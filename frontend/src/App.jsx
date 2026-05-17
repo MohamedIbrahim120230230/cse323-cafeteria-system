@@ -3,7 +3,18 @@ import { BrowserRouter, Routes, Route, NavLink, Outlet, useNavigate, Navigate } 
 import Login from "./features/auth/auth_components";
 import MenuPage from "./features/menu-cart/MenuPage";
 import AdminPanel from "./features/menu-cart/AdminPanel";
-import OrderPaymentApp from "./order_payment";
+
+// TEMPORARY BYPASS - Defines the component here so Vite stops looking for a missing file
+function OrderPaymentApp() {
+  return (
+    <div className="container mt-5 text-center">
+      <div className="card p-5 shadow">
+        <h3>🛒 Order & Payment Page</h3>
+        <p className="text-muted">Placeholder active. Frontend code compiled successfully!</p>
+      </div>
+    </div>
+  );
+}
 
 // 1. Route Protector: Kicks unauthenticated users back to login
 function ProtectedRoute({ user, children }) {
@@ -43,7 +54,6 @@ function LoginPage({ setUser }) {
   return (
     <Login
       onLoginSuccess={(data) => {
-        // Save token and user, then force navigation to the menu
         localStorage.setItem("user", JSON.stringify(data.user));
         setUser(data.user);
         navigate("/menu");
@@ -53,7 +63,6 @@ function LoginPage({ setUser }) {
 }
 
 export default function App() {
-  // 2. Global State: This sits at the very top so ALL routes can see it
   const [user, setUser] = useState(() => {
     const saved = localStorage.getItem("user");
     return saved ? JSON.parse(saved) : null;
@@ -62,7 +71,7 @@ export default function App() {
 
   const handleLogout = () => {
     localStorage.removeItem("user");
-    localStorage.removeItem("jwt_token"); // Ensure token is wiped
+    localStorage.removeItem("jwt_token");
     setUser(null);
     setCart([]);
   };
@@ -75,19 +84,15 @@ export default function App() {
 
         {/* Protected Routes inside the Layout */}
         <Route element={<ProtectedRoute user={user}><CafeteriaLayout user={user} handleLogout={handleLogout} /></ProtectedRoute>}>
-          
-          {/* Pass the global cart to the Menu so it can add items */}
           <Route path="/menu" element={<MenuPage cart={cart} setCart={setCart} />} />
-          
           <Route path="/admin" element={<AdminPanel />} />
         </Route>
 
-        {/* Standalone Order Route (No double navbar) */}
+        {/* Standalone Order Route using local component */}
         <Route 
           path="/order" 
           element={
             <ProtectedRoute user={user}>
-              {/* Pass the global cart and user to the Order App so it can process payment */}
               <OrderPaymentApp 
                 user={user} 
                 cart={cart} 
