@@ -56,6 +56,117 @@ Built as a vertical-slice team project for CSE323, with each member owning a com
 
 ---
 
+## 📐 UML Class Diagram
+
+```mermaid
+classDiagram
+    class User {
+        +UUID id
+        +String email
+        +String display_name
+        +String password_hash
+        +UserRole role
+        +UserStatus status
+        +Integer failed_attempts
+        +DateTime locked_until
+        +Decimal wallet_balance
+        +Decimal meal_plan_balance
+        +DateTime created_at
+        +login()
+        +logout()
+        +resetPassword()
+    }
+
+    class MenuItem {
+        +Integer id
+        +String name
+        +String category
+        +Decimal price
+        +Integer stock_qty
+        +Integer max_order_qty
+        +Boolean active
+        +isAvailable()
+        +updateStock()
+    }
+
+    class CartSession {
+        +Integer id
+        +UUID user_id
+        +JSONB items
+        +DateTime locked_at
+        +DateTime updated_at
+        +addItem()
+        +removeItem()
+        +lock()
+        +isLocked()
+    }
+
+    class Voucher {
+        +Integer id
+        +String code
+        +Decimal discount
+        +Decimal min_order
+        +DateTime expires_at
+        +UUID used_by
+        +isValid()
+        +isExpired()
+        +apply()
+    }
+
+    class Order {
+        +UUID id
+        +UUID user_id
+        +JSONB items
+        +OrderStatus status
+        +String payment_method
+        +Decimal total
+        +DateTime created_at
+        +place()
+        +cancel()
+        +advance()
+    }
+
+    class OrderItem {
+        +Integer id
+        +UUID order_id
+        +Integer menu_item_id
+        +Integer quantity
+        +Decimal unit_price
+        +getSubtotal()
+    }
+
+    class Feedback {
+        +Integer id
+        +UUID order_id
+        +UUID user_id
+        +Integer rating
+        +String comment
+        +DateTime created_at
+        +submit()
+    }
+
+    class PasswordResetToken {
+        +Integer id
+        +UUID user_id
+        +String token
+        +DateTime expires_at
+        +Boolean used
+        +validate()
+    }
+
+    User "1" --> "0..*" CartSession : has
+    User "1" --> "0..*" Order : places
+    User "1" --> "0..*" Feedback : writes
+    User "1" --> "0..*" PasswordResetToken : requests
+    CartSession "1" --> "0..*" MenuItem : contains
+    Order "1" --> "1..*" OrderItem : includes
+    OrderItem "0..*" --> "1" MenuItem : references
+    Voucher "0..1" --> "0..1" User : used_by
+    Feedback "1" --> "1" Order : reviews
+```
+
+---
+
 ## 👥 Team & Ownership
 
 | Member | Slice | Branch | FRs |
@@ -101,8 +212,8 @@ used_by             updated_at          unit_price
 
 ### 1. Clone the repo
 ```bash
-git clone https://github.com/MohamedIbrahim120230230/cse323-cafeteria-system.git
-cd cse323-cafeteria-system
+git clone https://github.com/MohamedIbrahim120230230/CampusBite.git
+cd CampusBite
 ```
 
 ### 2. Set up the database
@@ -170,4 +281,3 @@ MIT — see [LICENSE](./LICENSE) for details.
 ---
 
 <p align="center">Built with ☕ by the CSE323 Team — EJUST 2026</p>
-
