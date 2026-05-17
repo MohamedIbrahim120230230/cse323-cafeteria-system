@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
 const API = 'http://127.0.0.1:5001';
+const USER_ID = '94ad2601-fc07-44f3-9e33-561fb34dd80d';
 
 export default function MenuPage() {
   const [items, setItems] = useState([]);
@@ -11,6 +12,7 @@ export default function MenuPage() {
   const [voucher, setVoucher] = useState('');
   const [discount, setDiscount] = useState(0);
   const [voucherMsg, setVoucherMsg] = useState('');
+  const [voucherApplied, setVoucherApplied] = useState(false);
 
   // FR09, FR10 — fetch menu
   useEffect(() => {
@@ -32,7 +34,7 @@ export default function MenuPage() {
   };
 
   // FR11 — add to cart
-  const addToCart = (item) => {
+  const addToCart = async (item) => {
     if (item.stock_qty === 0) return;
     const existing = cart.find(c => c.id === item.id);
     if (existing) {
@@ -43,6 +45,16 @@ export default function MenuPage() {
       setCart(cart.map(c => c.id === item.id ? { ...c, qty: c.qty + 1 } : c));
     } else {
       setCart([...cart, { ...item, qty: 1 }]);
+    }
+
+    // Sync with backend
+    try {
+      await axios.post(`${API}/api/cart/${USER_ID}/add`, {
+        item_id: item.id,
+        qty: 1
+      });
+    } catch (err) {
+      console.error('Cart sync error:', err);
     }
   };
 
@@ -68,13 +80,29 @@ export default function MenuPage() {
 
   // FR13 — apply voucher
   const applyVoucher = async () => {
+    // FR15 — prevent stacking
+    if (voucherApplied) {
+      setVoucherMsg('A voucher has already been applied. Stacking is not allowed');
+      return;
+    }
     try {
-      const res = await axios.post(`${API}/api/cart/1/voucher`, { code: voucher });
+      const res = await axios.post(`${API}/api/cart/${USER_ID}/voucher`, { code: voucher });
       setDiscount(res.data.discount);
       setVoucherMsg(`Voucher applied! You save ${res.data.discount} EGP`);
+      setVoucherApplied(true);
     } catch (err) {
       setVoucherMsg(err.response?.data?.error || 'Invalid voucher');
       setDiscount(0);
+    }
+  };
+
+  // FR17 — lock cart at checkout
+  const handleCheckout = async () => {
+    try {
+      await axios.post(`${API}/api/cart/${USER_ID}/lock`);
+      alert('Order placed! Your cart has been locked.');
+    } catch (err) {
+      console.error('Checkout error:', err);
     }
   };
 
@@ -125,12 +153,11 @@ export default function MenuPage() {
                     <p className="text-muted">{item.category}</p>
                     <p className="fw-bold">{item.price} EGP</p>
                     {item.stock_qty === 0
-                      ? <span className="badge bg-danger">Out of Stock</span>  
+                      ? <span className="badge bg-danger">Out of Stock</span>
                       : <span className="badge bg-success">In Stock ({item.stock_qty})</span>
                     }
                   </div>
                   <div className="card-footer">
-                    {/* FR11 — OOS non-selectable */}
                     <button
                       className="btn btn-primary w-100"
                       disabled={item.stock_qty === 0}
@@ -176,8 +203,15 @@ export default function MenuPage() {
                   placeholder="Voucher code"
                   value={voucher}
                   onChange={e => setVoucher(e.target.value)}
+                  disabled={voucherApplied}
                 />
-                <button className="btn btn-outline-primary" onClick={applyVoucher}>Apply</button>
+                <button
+                  className="btn btn-outline-primary"
+                  onClick={applyVoucher}
+                  disabled={voucherApplied}
+                >
+                  Apply
+                </button>
               </div>
               {voucherMsg && (
                 <p className={`small ${discount > 0 ? 'text-success' : 'text-danger'}`}>{voucherMsg}</p>
@@ -191,7 +225,12 @@ export default function MenuPage() {
               <p>Subtotal: <strong>{total.toFixed(2)} EGP</strong></p>
               {discount > 0 && <p className="text-success">Discount: -{discount} EGP</p>}
               <h5>Total: {finalTotal.toFixed(2)} EGP</h5>
-              <button className="btn btn-success w-100 mt-2">Proceed to Checkout</button>
+              <button
+                className="btn btn-success w-100 mt-2"
+                onClick={handleCheckout}
+              >
+                Proceed to Checkout
+              </button>
             </div>
           )}
         </div>
