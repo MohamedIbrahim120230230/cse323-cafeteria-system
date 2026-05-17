@@ -178,7 +178,7 @@ export function Login({ onLoginSuccess, navigate }) {
           {/* Logo */}
           <div className="uc-logo">
             <div className="uc-logo-mark">🍽️</div>
-            <span className="uc-logo-name">UniCafé</span>
+            <span className="uc-logo-name">CampusBite</span>
           </div>
 
           {/* ── LOGIN ── */}
