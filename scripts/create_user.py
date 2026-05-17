@@ -40,6 +40,9 @@ USERS_TO_CREATE = [
     # Staff
     ("staff.kitchen@ejust.edu.eg",     "Kitchen Staff",    "Pass1234!", "staff"),
     ("staff.cashier@ejust.edu.eg",     "Cashier",          "Pass1234!", "staff"),
+
+    # Admin
+    ("admin.cafeteria@ejust.edu.eg", "Cafeteria Admin", "Admin1234!", "admin"),
 ]
 
 
