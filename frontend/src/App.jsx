@@ -1,45 +1,33 @@
-import { useState, useEffect } from "react";
-import { BrowserRouter, Routes, Route, NavLink, Outlet, useNavigate, Navigate } from "react-router-dom";
-import Login from "./features/auth/auth_components";
+// App.jsx — CSE323 Cafeteria System
+// Fixed: Login is a named export, not a default export
+import { BrowserRouter, Routes, Route, NavLink, Outlet, useNavigate } from "react-router-dom";
+import { Login } from "./features/auth/auth_components";   // ← named export (was: default)
 import MenuPage from "./features/menu-cart/MenuPage";
 import AdminPanel from "./features/menu-cart/AdminPanel";
+import OrderPaymentApp from "./OrderPaymentApp";
 
-// TEMPORARY BYPASS - Defines the component here so Vite stops looking for a missing file
-function OrderPaymentApp() {
+function CafeteriaLayout() {
+  const role = (() => {
+    try { return JSON.parse(localStorage.getItem("user") || "{}").role || "student"; }
+    catch { return "student"; }
+  })();
+
   return (
-    <div className="container mt-5 text-center">
-      <div className="card p-5 shadow">
-        <h3>🛒 Order & Payment Page</h3>
-        <p className="text-muted">Placeholder active. Frontend code compiled successfully!</p>
-      </div>
-    </div>
-  );
-}
-
-// 1. Route Protector: Kicks unauthenticated users back to login
-function ProtectedRoute({ user, children }) {
-  if (!user) return <Navigate to="/" replace />;
-  return children;
-}
-
-function CafeteriaLayout({ user, handleLogout }) {
-  return (
-    <div>
-      <nav className="navbar navbar-dark bg-dark px-4 d-flex justify-content-between">
-        <span className="navbar-brand">🍴 Cafeteria System</span>
-        <div className="d-flex align-items-center">
-          <NavLink to="/menu" className={({ isActive }) => `btn me-2 ${isActive ? "btn-light" : "btn-outline-light"}`}>
-            Menu
-          </NavLink>
-          {user?.role === "admin" && (
-            <NavLink to="/admin" className={({ isActive }) => `btn me-2 ${isActive ? "btn-light" : "btn-outline-light"}`}>
-              Admin
-            </NavLink>
+    <div style={{ minHeight: "100vh", background: "#080d14" }}>
+      <nav className="navbar navbar-dark px-4" style={{ background: "#111825", borderBottom: "1px solid rgba(255,255,255,0.07)" }}>
+        <span className="navbar-brand fw-bold" style={{ fontFamily: "'Sora',sans-serif" }}>🍽️ CampusBite</span>
+        <div className="d-flex gap-2">
+          <NavLink to="/menu" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-light" : "btn-outline-light"}`}>Menu</NavLink>
+          {role === "admin" && (
+            <NavLink to="/admin" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-light" : "btn-outline-light"}`}>Admin</NavLink>
           )}
-          <NavLink to="/order" className={({ isActive }) => `btn me-2 ${isActive ? "btn-light" : "btn-outline-light"}`}>
-            Cart & Pay
-          </NavLink>
-          <button className="btn btn-danger ms-3" onClick={handleLogout}>Logout</button>
+          <NavLink to="/order" className={({ isActive }) => `btn btn-sm ${isActive ? "btn-light" : "btn-outline-light"}`}>Order & Pay</NavLink>
+          <button
+            className="btn btn-sm btn-outline-danger"
+            onClick={() => { localStorage.removeItem("jwt_token"); localStorage.removeItem("user"); window.location.href = "/"; }}
+          >
+            Sign Out
+          </button>
         </div>
       </nav>
       <div className="p-4">
@@ -49,59 +37,45 @@ function CafeteriaLayout({ user, handleLogout }) {
   );
 }
 
-function LoginPage({ setUser }) {
+function LoginPage() {
   const navigate = useNavigate();
   return (
     <Login
+      navigate={navigate}
       onLoginSuccess={(data) => {
+        // apiFetch already unwraps { success, data } envelope
+        // so data here = { access_token, refresh_token, user, ... }
+        localStorage.setItem("jwt_token", data.access_token);
         localStorage.setItem("user", JSON.stringify(data.user));
-        setUser(data.user);
-        navigate("/menu");
       }}
     />
   );
 }
 
-export default function App() {
-  const [user, setUser] = useState(() => {
-    const saved = localStorage.getItem("user");
-    return saved ? JSON.parse(saved) : null;
-  });
-  const [cart, setCart] = useState([]);
+function ProtectedRoute({ children }) {
+  const token = localStorage.getItem("jwt_token");
+  if (!token) { window.location.href = "/"; return null; }
+  return children;
+}
 
-  const handleLogout = () => {
-    localStorage.removeItem("user");
-    localStorage.removeItem("jwt_token");
-    setUser(null);
-    setCart([]);
-  };
-
+function App() {
   return (
     <BrowserRouter>
       <Routes>
-        {/* Public Route */}
-        <Route path="/" element={<LoginPage setUser={setUser} />} />
+        {/* Public */}
+        <Route path="/" element={<LoginPage />} />
 
-        {/* Protected Routes inside the Layout */}
-        <Route element={<ProtectedRoute user={user}><CafeteriaLayout user={user} handleLogout={handleLogout} /></ProtectedRoute>}>
-          <Route path="/menu" element={<MenuPage cart={cart} setCart={setCart} />} />
+        {/* Protected — share CafeteriaLayout navbar */}
+        <Route element={<ProtectedRoute><CafeteriaLayout /></ProtectedRoute>}>
+          <Route path="/menu"  element={<MenuPage />} />
           <Route path="/admin" element={<AdminPanel />} />
         </Route>
 
-        {/* Standalone Order Route using local component */}
-        <Route 
-          path="/order" 
-          element={
-            <ProtectedRoute user={user}>
-              <OrderPaymentApp 
-                user={user} 
-                cart={cart} 
-                clearCart={() => setCart([])} 
-              />
-            </ProtectedRoute>
-          } 
-        />
+        {/* Order & Payment has its own navbar — rendered outside CafeteriaLayout */}
+        <Route path="/order" element={<ProtectedRoute><OrderPaymentApp /></ProtectedRoute>} />
       </Routes>
     </BrowserRouter>
   );
 }
+
+export default App;
