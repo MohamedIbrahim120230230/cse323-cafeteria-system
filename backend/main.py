@@ -1,13 +1,14 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, Depends, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from auth.routes import router as auth_router
+from stock.routes import router as stock_router
+from order.order_payment import router as order_router   
 import psycopg2
 import psycopg2.extras
 import os
-from stock.routes import router as stock_router
 
 app = FastAPI(title="University Cafeteria API", version="1.0")
 
@@ -21,6 +22,9 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(stock_router)
+app.include_router(order_router)   # ← ADD THIS
+
+
 def get_db():
     return psycopg2.connect(
         host=os.getenv("DB_HOST", "localhost"),
@@ -34,17 +38,19 @@ def get_db():
 
 @app.get("/api/v1/menu/items")
 def get_menu_items(
-    category: str = Query(None),
-    search: str = Query(None)
+    category: str = None,
+    search: str = None
 ):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # ✅ Fixed: Removed 'description', used correct schema columns 'stock_qty' and 'active'
     cur.execute("""
         SELECT id, name, category, price, stock_qty, max_order_qty, active
         FROM menu_items
         WHERE active = TRUE
-        AND (%s IS NULL OR category = %s)
-        AND (%s IS NULL OR name ILIKE '%%' || %s || '%%')
+          AND (%s IS NULL OR category = %s)
+          AND (%s IS NULL OR name ILIKE '%%' || %s || '%%')
         ORDER BY category, name
     """, (category, category, search, search))
     items = cur.fetchall()
@@ -68,11 +74,14 @@ def admin_get_menu():
 def admin_create_item(data: dict):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # ✅ Fixed: Target 'stock_qty' and 'active' columns directly
     cur.execute("""
-        INSERT INTO menu_items (name, category, price, stock_qty, max_order_qty, active)
-        VALUES (%s, %s, %s, %s, %s, %s) RETURNING *
+        INSERT INTO menu_items (name, category, price, stock_qty, active)
+        VALUES (%s, %s, %s, %s, %s) RETURNING *
     """, (data["name"], data["category"], data["price"],
-          data["stock_qty"], data.get("max_order_qty", 10), data.get("active", True)))
+          data.get("stock_qty", 0),
+          data.get("active", True)))
     item = cur.fetchone()
     conn.commit()
     cur.close()
@@ -80,15 +89,20 @@ def admin_create_item(data: dict):
     return dict(item)
 
 @app.put("/api/v1/admin/menu/{item_id}")
-def admin_update_item(item_id: int, data: dict):
+def admin_update_item(item_id: int, data: dict): # ✅ Fixed: item_id is an int
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    
+    # ✅ Fixed: Target proper columns and cast item_id to ::int / %s instead of ::uuid
     cur.execute("""
-        UPDATE menu_items SET name=%s, category=%s, price=%s,
-        stock_qty=%s, max_order_qty=%s, active=%s, updated_at=NOW()
+        UPDATE menu_items
+        SET name=%s, category=%s, price=%s,
+            stock_qty=%s, active=%s, updated_at=NOW()
         WHERE id=%s RETURNING *
     """, (data["name"], data["category"], data["price"],
-          data["stock_qty"], data["max_order_qty"], data["active"], item_id))
+          data.get("stock_qty", 0),
+          data.get("active", True),
+          item_id))
     item = cur.fetchone()
     conn.commit()
     cur.close()
@@ -96,9 +110,11 @@ def admin_update_item(item_id: int, data: dict):
     return dict(item)
 
 @app.delete("/api/v1/admin/menu/{item_id}")
-def admin_delete_item(item_id: int):
+def admin_delete_item(item_id: int): # ✅ Fixed: item_id is an int
     conn = get_db()
     cur = conn.cursor()
+    
+    # ✅ Fixed: Update 'active' flag using correct column and ID mapping
     cur.execute("UPDATE menu_items SET active = FALSE WHERE id = %s", (item_id,))
     conn.commit()
     cur.close()
@@ -111,10 +127,14 @@ def admin_delete_item(item_id: int):
 def cart_add(data: dict):
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM menu_items WHERE id = %s AND active = TRUE", (data["item_id"],))
+    
+    
+    cur.execute("SELECT * FROM menu_items WHERE id = %s::int AND active = TRUE", (data["item_id"],))
     item = cur.fetchone()
     if not item:
-        return {"error": "Item not found"}, 404
+        cur.close()
+        conn.close()
+        return {"error": "Item not found"}
     cur.close()
     conn.close()
     return {"message": "Item added to cart"}

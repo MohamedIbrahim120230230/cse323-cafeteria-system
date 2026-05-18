@@ -91,13 +91,14 @@ export default function MenuPage() {
   // Cart state
   const [cart,          setCart]          = useState([]);
   const [cartOpen,      setCartOpen]      = useState(false);
-  const [cartLocked,    setCartLocked]    = useState(false);  // TDP-M2-02 P1
-  const [lockWarnings,  setLockWarnings]  = useState([]);     // TDP-M2-02 P2
+  const [cartLocked,    setCartLocked]    = useState(false);
+  const [lockWarnings,  setLockWarnings]  = useState([]);
 
   // Voucher state
   const [voucher,         setVoucher]         = useState("");
-  const [voucherApplied,  setVoucherApplied]  = useState(false);  // TDP-M2-01 P3
+  const [voucherApplied,  setVoucherApplied]  = useState(false);
   const [discount,        setDiscount]        = useState(0);
+  const [appliedVoucherObj, setAppliedVoucherObj] = useState(null);
   const [voucherLoading,  setVoucherLoading]  = useState(false);
   const [voucherError,    setVoucherError]    = useState("");
 
@@ -120,7 +121,7 @@ export default function MenuPage() {
     } finally {
       setLoading(false);
     }
-  }, [category, search]);  // eslint-disable-line
+  }, [category, search]); // eslint-disable-line
 
   useEffect(() => { fetchMenu(); }, [category]);
 
@@ -140,7 +141,6 @@ export default function MenuPage() {
     const existing = cart.find(c => c.id === item.id);
     const newQty   = existing ? existing.qty + 1 : 1;
 
-    // TDP-M2-03 P1/P2: enforce per-item cap
     if (newQty > item.max_order_qty) {
       addToast(`Max ${item.max_order_qty} per order for "${item.name}".`, "warn");
       return;
@@ -170,7 +170,6 @@ export default function MenuPage() {
     setCart(prev => prev.filter(c => c.id !== id));
   };
 
-  // TDP-M2-03 P3: re-validate cap at every qty update
   const updateQty = (id, qty) => {
     if (guardLocked()) return;
     if (qty < 1) { removeFromCart(id); return; }
@@ -184,12 +183,12 @@ export default function MenuPage() {
 
   // ── Totals ──────────────────────────────────────────────────
   const subtotal        = cart.reduce((s, c) => s + c.price * c.qty, 0);
-  const finalTotal      = Math.max(0, subtotal - discount);           // TDP-M2-01 P1
-  const appliedDiscount = Math.min(discount, subtotal);               // TDP-M2-01 P2
+  const finalTotal      = Math.max(0, subtotal - discount);
+  const appliedDiscount = Math.min(discount, subtotal);
 
   // ── Voucher ─────────────────────────────────────────────────
   const applyVoucher = async () => {
-    if (voucherApplied) {                                             // TDP-M2-01 P3
+    if (voucherApplied) {
       setVoucherError(VOUCHER_ERRORS.VOUCHER_STACK_REJECTED);
       return;
     }
@@ -202,9 +201,15 @@ export default function MenuPage() {
         method: "POST",
         body: JSON.stringify({ code: voucher.trim().toUpperCase() }),
       });
-      setDiscount(Math.min(data.discount ?? data.discount_egp ?? 0, subtotal));
+      const discountAmt = Math.min(data.discount ?? data.discount_egp ?? 0, subtotal);
+      setDiscount(discountAmt);
       setVoucherApplied(true);
-      addToast(`Voucher applied! You save ${Math.min(data.discount ?? 0, subtotal).toFixed(2)} EGP`, "success");
+      setAppliedVoucherObj({
+        code: voucher.trim().toUpperCase(),
+        discount_type: data.discount_type ?? "flat",
+        discount_value: data.discount ?? data.discount_egp ?? 0,
+      });
+      addToast(`Voucher applied! You save ${discountAmt.toFixed(2)} EGP`, "success");
     } catch (err) {
       const code = err?.code ?? "";
       setVoucherError(
@@ -222,26 +227,42 @@ export default function MenuPage() {
     setDiscount(0);
     setVoucher("");
     setVoucherError("");
+    setAppliedVoucherObj(null);
     addToast("Voucher removed.", "success");
   };
 
-  // ── Checkout / Cart Lock ─────────────────────────────────────
+  // ── Checkout — lock cart then hand off to OrderPaymentApp ───
+  // Instead of calling /cart/lock and navigating blind, we pass
+  // the full cart + pricing through location.state so
+  // OrderPaymentApp doesn't need its own cart/menu.
   const handleCheckout = async () => {
+    if (cart.length === 0) return;
     setCheckoutLoading(true);
     setLockWarnings([]);
+
     try {
       const data = await apiFetch("/cart/lock", { method: "POST" });
 
-      if (data.warnings?.length) {                                    // TDP-M2-02 P2
+      if (data.warnings?.length) {
         setLockWarnings(data.warnings);
         addToast("Prices changed — please review before confirming.", "warn");
         setCheckoutLoading(false);
         return;
       }
 
-      setCartLocked(true);
-      addToast("Order placed! Redirecting to payment…", "success");
-      setTimeout(() => navigate("/order"), 1500);
+      // ── Hand off to OrderPaymentApp with full cart state ──
+      navigate("/order", {
+        state: {
+          cart,
+          subtotal,
+          discount:     appliedDiscount,
+          total:        finalTotal,
+          voucherCode:  appliedVoucherObj?.code ?? null,
+          // Pre-built order from lock response (may contain order id)
+          lockedOrder:  data.order ?? null,
+        },
+      });
+
     } catch (err) {
       if (err?.code === "ITEM_OUT_OF_STOCK") {
         addToast(`${err.message}`, "error");
@@ -254,6 +275,12 @@ export default function MenuPage() {
     } finally {
       setCheckoutLoading(false);
     }
+  };
+
+  // Confirm after price-change warnings
+  const confirmWarningsAndCheckout = async () => {
+    setLockWarnings([]);
+    await handleCheckout();
   };
 
   // ── Logout ───────────────────────────────────────────────────
@@ -274,7 +301,7 @@ export default function MenuPage() {
         <div className="uc-mesh"  aria-hidden="true" />
         <div className="uc-grid"  aria-hidden="true" />
 
-{/* ── SINGLE Navbar ── */}
+        {/* ── SINGLE Navbar ── */}
         <nav className="mp-nav">
           {/* Brand */}
           <div className="mp-nav-brand">
@@ -288,12 +315,9 @@ export default function MenuPage() {
               <button className="mp-nav-tab mp-nav-tab--active">
                 <i className="bi bi-storefront" /> Menu
               </button>
-              
               <button className="mp-nav-tab" onClick={() => navigate("/admin")}>
                 <i className="bi bi-gear-fill" /> Admin
               </button>
-              
-              {/* 💡 YOUR NEW STOCK BUTTON */}
               <button className="mp-nav-tab" onClick={() => navigate("/stock")}>
                 <i className="bi bi-boxes" /> Stock
               </button>
@@ -379,7 +403,7 @@ export default function MenuPage() {
                       {w.item}: {w.old_price} EGP → <strong>{w.new_price} EGP</strong>
                     </div>
                   ))}
-                  <button className="mp-warn-confirm" onClick={() => { setLockWarnings([]); handleCheckout(); }}>
+                  <button className="mp-warn-confirm" onClick={confirmWarningsAndCheckout}>
                     Confirm new prices &amp; proceed
                   </button>
                 </div>
@@ -636,7 +660,7 @@ function CartPanel({
 }
 
 // ════════════════════════════════════════════════════════════
-// CSS
+// CSS  (unchanged from original)
 // ════════════════════════════════════════════════════════════
 const MENU_CSS = `
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }

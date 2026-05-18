@@ -127,15 +127,26 @@ CONFIG_TTL_SECONDS = 60
 
 
 async def _get_config(key: str, default=None):
-    """Load config from DB, cached for 60 seconds (FR54)."""
+    """Load config from DB, cached for 60 seconds (FR54) with safety fallbacks."""
     import time
     global _config_cache, _config_loaded_at
     if time.time() - _config_loaded_at > CONFIG_TTL_SECONDS:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch("SELECT key, value FROM system_config")
-            _config_cache = {r["key"]: r["value"] for r in rows}
-        _config_loaded_at = time.time()
+        try:
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                rows = await conn.fetch("SELECT key, value FROM system_config")
+                _config_cache = {r["key"]: r["value"] for r in rows}
+            _config_loaded_at = time.time()
+        except Exception:
+            # Safety fallback defaults if database table is initializing or unreachable
+            _config_cache = {
+                "max_concurrent_orders": "150",
+                "unrealistic_qty_threshold": "10",
+                "unrealistic_total_threshold": "500",
+                "stock_lock_ttl_minutes": "10",
+                "flagged_order_ttl_minutes": "60"
+            }
+            _config_loaded_at = time.time()
     return _config_cache.get(key, default)
 
 
@@ -701,7 +712,9 @@ async def get_active_locks(request: Request):
                  AND  sl.expires_at > NOW()
                ORDER BY sl.expires_at ASC""",
         )
-    return ok({"active_locks": [dict(r) for r in rows], "count": len(rows)})
+    # ✅ FIX: Explicitly apply jsonable_encoder to strip datetime instances
+    serializable_locks = jsonable_encoder([dict(r) for r in rows])
+    return ok({"active_locks": serializable_locks, "count": len(rows)})
 
 # ══════════════════════════════════════════════════════════════
 # DELETE /api/v1/stock/locks/{lock_id}/release
@@ -875,7 +888,9 @@ async def get_config(request: Request):
         rows = await conn.fetch(
             "SELECT key, value, description, updated_by::text, updated_at FROM system_config ORDER BY key"
         )
-    return ok([dict(r) for r in rows])
+    # ✅ FIX: Apply jsonable_encoder to make updated_at datetime payload clean for JSON transfer
+    serializable_config = jsonable_encoder([dict(r) for r in rows])
+    return ok(serializable_config)
 
 
 # ══════════════════════════════════════════════════════════════

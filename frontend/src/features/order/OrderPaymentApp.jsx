@@ -1,319 +1,333 @@
 // ============================================================
-// OrderPaymentApp.jsx  —  CSE323 Cafeteria System
-// Member 3: Order & Payment  (FR8–FR17, FR24, FR26–FR31)
+// frontend/src/features/order/OrderPaymentApp.jsx
+// Member 3 — Order & Payment
+// FR08–FR17, FR22–FR31
+// TDP-M3-01 Stock Lock · TDP-M3-02 Idempotency
+// TDP-M3-03 Payment Resilience · TDP-M3-04 Load Shedding
 //
-// Integration contracts respected:
-//  • Auth   (Member 1): JWT from localStorage["jwt_token"],
-//                       apiFetch base = /api/v1, Bearer header
-//  • Menu   (Member 2): fields stock_qty / max_order_qty / active,
-//                       endpoint GET /api/v1/menu/items
-//  • Admin  (Member 2): same field names, /api/v1/admin/menu
-//  • Order  (Member 3): POST /api/v1/orders, /api/v1/payments/*
+// INTEGRATION NOTE:
+//   Cart state is owned by MenuPage. When the user clicks
+//   "Checkout" there, MenuPage calls /cart/lock then navigates
+//   here with location.state = { cart, subtotal, discount,
+//   total, voucherCode, lockedOrder }.
+//   This component therefore starts at the "checkout" step and
+//   never renders its own menu or cart UI.
 // ============================================================
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { apiFetch } from "./shared/api";
+import { useNavigate, useLocation } from "react-router-dom";
+import { apiFetch } from "../../shared/api";
 
-// ─────────────────────────────────────────────────────────────
-// FIELD NORMALISER
-// Member 2 uses stock_qty / max_order_qty / active
-// Member 3 backend uses stock_count / available_stock / is_available
-// This normaliser maps both shapes to one internal shape.
-// ─────────────────────────────────────────────────────────────
-function normaliseItem(item) {
-  return {
-    ...item,
-    // stock: prefer available_stock (backend lock-aware), fall back to stock_qty
-    available_stock: item.available_stock ?? item.stock_qty ?? 0,
-    stock_qty:       item.stock_qty       ?? item.stock_count ?? 0,
-    // availability flag
-    is_available:    item.is_available    ?? item.active      ?? true,
-    // per-item quantity cap
-    max_order_qty:   item.max_order_qty   ?? 20,
-    // emoji / image
-    image_url:       item.image_url       ?? "🍽️",
-  };
+// ── Fonts & Icons (same as Login) ─────────────────────────────
+if (typeof document !== "undefined") {
+  if (!document.querySelector('link[href*="Sora"]')) {
+    const f = document.createElement("link");
+    f.rel  = "stylesheet";
+    f.href = "https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=DM+Sans:wght@400;500;600&display=swap";
+    document.head.appendChild(f);
+  }
+  if (!document.querySelector('link[href*="bootstrap-icons"]')) {
+    const i = document.createElement("link");
+    i.rel  = "stylesheet";
+    i.href = "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css";
+    document.head.appendChild(i);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
-// MOCK DATA  (used only when backend is unreachable)
+// Constants
 // ─────────────────────────────────────────────────────────────
-const MOCK_MENU = [
-  { id:"m1", name:"Classic Cheeseburger", price:120, category:"meals",     image_url:"🍔", active:true,  stock_qty:50,  max_order_qty:10 },
-  { id:"m2", name:"Club Sandwich",        price:85,  category:"meals",     image_url:"🥪", active:true,  stock_qty:30,  max_order_qty:10 },
-  { id:"m3", name:"Grilled Chicken Wrap", price:95,  category:"meals",     image_url:"🌯", active:true,  stock_qty:35,  max_order_qty:10 },
-  { id:"m4", name:"Caesar Salad",         price:70,  category:"snacks",    image_url:"🥗", active:true,  stock_qty:40,  max_order_qty:10 },
-  { id:"m5", name:"Iced Latte",           price:60,  category:"beverages", image_url:"☕", active:true,  stock_qty:100, max_order_qty:5  },
-  { id:"m6", name:"Fresh Orange Juice",   price:45,  category:"beverages", image_url:"🍊", active:true,  stock_qty:80,  max_order_qty:5  },
-  { id:"m7", name:"Water Bottle",         price:15,  category:"beverages", image_url:"💧", active:true,  stock_qty:200, max_order_qty:10 },
-  { id:"m8", name:"Fish Sandwich",        price:90,  category:"meals",     image_url:"🐟", active:false, stock_qty:0,   max_order_qty:10 },
-].map(normaliseItem);
+const PAY_TIMEOUT_SECONDS    = 600;
+const MAX_PAYMENT_RETRIES    = 3;
+const CANCEL_WINDOW_SECS     = 120;
+const LOAD_SHED_MESSAGE      = "Service temporarily busy. Please try again shortly.";
 
-const MOCK_VOUCHERS = {
-  SAVE20:   { code:"SAVE20",   discount_type:"flat",          discount_value:20,  min_order:50  },
-  HALF50:   { code:"HALF50",   discount_type:"percent",       discount_value:50,  min_order:100 },
-  FREESHIP: { code:"FREESHIP", discount_type:"free_delivery", discount_value:0,   min_order:0   },
+const STEPS = ["checkout", "payment", "tracking"];
+
+const STATUS_META = {
+  pending_payment:  { label:"Pending Payment",  color:"var(--uc-warn)",   icon:"bi-clock-fill"         },
+  confirmed:        { label:"Confirmed",         color:"var(--uc-acc)",    icon:"bi-check-circle-fill"  },
+  preparing:        { label:"Preparing",         color:"#a78bfa",          icon:"bi-fire"               },
+  ready_for_pickup: { label:"Ready for Pickup",  color:"var(--uc-acc2)",   icon:"bi-bag-check-fill"     },
+  delivered:        { label:"Delivered",         color:"var(--uc-acc2)",   icon:"bi-check2-all"         },
+  cancelled:        { label:"Cancelled",         color:"var(--uc-danger)", icon:"bi-x-circle-fill"      },
+  payment_timeout:  { label:"Payment Timeout",   color:"var(--uc-muted)",  icon:"bi-alarm-fill"         },
+  payment_failed:   { label:"Payment Failed",    color:"var(--uc-danger)", icon:"bi-x-circle-fill"      },
 };
 
 // ─────────────────────────────────────────────────────────────
-// HELPERS
+// Helpers
 // ─────────────────────────────────────────────────────────────
-function computeDiscount(v, sub) {
-  if (!v) return 0;
-  if (v.discount_type === "flat")    return Math.min(v.discount_value, sub);
-  if (v.discount_type === "percent") return Math.round(sub * v.discount_value / 100 * 100) / 100;
-  return 0;
-}
-
 function fmtTime(s) {
-  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`;
+}
+
+function generateIdempotencyKey(userId) {
+  return `IDP-${userId}-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
 }
 
 // ─────────────────────────────────────────────────────────────
-// CONSTANTS
+// Toast hook
 // ─────────────────────────────────────────────────────────────
-const STEPS = ["cart", "checkout", "payment", "tracking"];
+function useToast() {
+  const [toasts, setToasts] = useState([]);
+  const add = useCallback((message, type = "success") => {
+    const id = Date.now() + Math.random();
+    setToasts(p => [...p, { id, message, type }]);
+    setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 3500);
+  }, []);
+  const remove = useCallback(id => setToasts(p => p.filter(t => t.id !== id)), []);
+  return { toasts, addToast: add, removeToast: remove };
+}
 
-const STATUS_LABELS = {
-  pending_payment:  "Pending Payment",
-  confirmed:        "Confirmed",
-  preparing:        "Preparing",
-  ready_for_pickup: "Ready for Pickup",
-  delivered:        "Delivered",
-  cancelled:        "Cancelled",
-  payment_timeout:  "Payment Timeout",
-};
-
-const STATUS_COLORS = {
-  pending_payment:  "warning",
-  confirmed:        "info",
-  preparing:        "primary",
-  ready_for_pickup: "success",
-  delivered:        "success",
-  cancelled:        "danger",
-  payment_timeout:  "secondary",
-};
-
-const PAY_TIMEOUT_SECS = 600;   // FR24 — 10 min
-const CANCEL_WINDOW_MS = 15 * 60 * 1000; // FR26 — 15 min
+function ToastStack({ toasts, removeToast }) {
+  return (
+    <div style={{ position:"fixed", bottom:24, right:24, zIndex:9999, display:"flex", flexDirection:"column", gap:8 }}>
+      {toasts.map(t => (
+        <div key={t.id} className={`op-toast op-toast--${t.type}`}>
+          <i className={`bi ${t.type==="success"?"bi-check-circle-fill":t.type==="warn"?"bi-exclamation-triangle-fill":"bi-x-circle-fill"}`} />
+          <span>{t.message}</span>
+          <button onClick={() => removeToast(t.id)} className="op-toast-close"><i className="bi bi-x" /></button>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 // ─────────────────────────────────────────────────────────────
+// Step indicator  (checkout → payment → tracking)
+// ─────────────────────────────────────────────────────────────
+function StepBar({ step }) {
+  const idx = STEPS.indexOf(step);
+  return (
+    <div className="op-stepbar">
+      {STEPS.map((s, i) => {
+        const done   = i < idx;
+        const active = i === idx;
+        return (
+          <div key={s} style={{ display:"contents" }}>
+            <div className="op-step">
+              <div className={`op-step-dot ${done?"op-step-dot--done":active?"op-step-dot--active":""}`}>
+                {done ? <i className="bi bi-check-lg" /> : <span>{i+1}</span>}
+              </div>
+              <span className={`op-step-label ${active?"op-step-label--active":""}`}>
+                {s.charAt(0).toUpperCase()+s.slice(1)}
+              </span>
+            </div>
+            {i < STEPS.length-1 && <div className={`op-step-line ${i < idx ? "op-step-line--done" : ""}`} />}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Confirm modal
+// ─────────────────────────────────────────────────────────────
+function Modal({ title, onClose, onConfirm, confirmLabel, danger, loading, children }) {
+  return (
+    <>
+      <div className="op-backdrop" onClick={onClose} />
+      <div className="op-modal-wrap" role="dialog" aria-modal="true">
+        <div className="op-modal">
+          <div className="op-modal-hd">
+            <h3 className="op-modal-title">{title}</h3>
+            <button className="op-icon-btn" onClick={onClose} aria-label="Close">
+              <i className="bi bi-x-lg" />
+            </button>
+          </div>
+          <div className="op-modal-body">{children}</div>
+          <div className="op-modal-ft">
+            <button className="op-ghost-btn" onClick={onClose} disabled={loading}>Keep Order</button>
+            <button
+              className={`op-action-btn ${danger ? "op-action-btn--danger" : "op-action-btn--warn"}`}
+              onClick={onConfirm} disabled={loading}
+            >
+              {loading ? <><span className="op-spinner-sm" /> Processing…</> : confirmLabel}
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
 // MAIN COMPONENT
-// ─────────────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════
 export default function OrderPaymentApp() {
-  // ── Who is logged in? Read from JWT payload set by Member 1 ──
+  const navigate  = useNavigate();
+  const location  = useLocation();
+  const { toasts, addToast, removeToast } = useToast();
+
+  // ── Receive cart from MenuPage via navigation state ────────
+  const incoming = location.state ?? {};
+  // cart items passed from MenuPage (already locked)
+  const incomingCart       = incoming.cart        ?? [];
+  const incomingSubtotal   = incoming.subtotal    ?? 0;
+  const incomingDiscount   = incoming.discount    ?? 0;
+  const incomingTotal      = incoming.total       ?? 0;
+  const incomingVoucher    = incoming.voucherCode ?? null;
+  const incomingLockedOrder= incoming.lockedOrder ?? null;
+
+  // ── Current user from JWT ─────────────────────────────────
   const currentUser = (() => {
     try {
       const token = localStorage.getItem("jwt_token");
-      if (!token) return { id: "guest", name: "Guest", role: "student" };
+      if (!token) return { id:"guest", name:"Guest", role:"student" };
       const payload = JSON.parse(atob(token.split(".")[1]));
-      return { id: payload.sub || payload.user_id || "user", name: payload.name || payload.email || "Student", role: payload.role || "student" };
-    } catch {
-      return { id: "guest", name: "Guest", role: "student" };
-    }
+      return {
+        id:   payload.sub || payload.user_id || "user",
+        name: payload.name || payload.email  || "Student",
+        role: payload.role || "student",
+      };
+    } catch { return { id:"guest", name:"Guest", role:"student" }; }
   })();
 
   // ── State ─────────────────────────────────────────────────
-  const [step,           setStep]          = useState("cart");
-  const [menu,           setMenu]          = useState([]);
-  const [menuLoading,    setMenuLoading]   = useState(true);
-  const [menuError,      setMenuError]     = useState(null);
-  const [cart,           setCart]          = useState([]);
-  const [search,         setSearch]        = useState("");
-  const [category,       setCategory]      = useState("");   // "" = All, matches Member 2 convention
-  const [voucherCode,    setVoucherCode]   = useState("");
-  const [appliedVoucher, setApplied]       = useState(null);
-  const [voucherApplied, setVoucherApplied]= useState(false); // FR15 — no stacking
-  const [voucherMsg,     setVoucherMsg]    = useState(null);
-  const [order,          setOrder]         = useState(null);
-  const [payMethod,      setPayMethod]     = useState("online");
-  const [payState,       setPayState]      = useState("idle");
-  const [paymentId,      setPaymentId]     = useState(null);
-  const [payError,       setPayError]      = useState(null);
-  const [cancelModal,    setCancelModal]   = useState(false);
-  const [partialModal,   setPartialModal]  = useState(false);
-  const [toast,          setToast]         = useState(null);
-  const [timeLeft,       setTimeLeft]      = useState(null);
-  const [loading,        setLoading]       = useState(false);
-  const timerRef = useRef(null);
+  // Always start at "checkout" since cart was handled in MenuPage
+  const [step,         setStep]        = useState("checkout");
+  const [order,        setOrder]       = useState(null);
+  const [payMethod,    setPayMethod]   = useState("online");
+  const [payState,     setPayState]    = useState("idle");
+  const [paymentId,    setPaymentId]   = useState(null);
+  const [payError,     setPayError]    = useState(null);
+  const [retryCount,   setRetryCount]  = useState(0);
+  const [timeLeft,     setTimeLeft]    = useState(null);
+  const [loading,      setLoading]     = useState(false);
+  const [cancelModal,  setCancelModal] = useState(false);
+  const [partialModal, setPartialModal]= useState(false);
 
-  // ── Toast helper ──────────────────────────────────────────
-  const showToast = useCallback((msg, type = "success") => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 3500);
-  }, []);
+  const timerRef    = useRef(null);
+  const idempKeyRef = useRef(null);
 
-  // ── Load menu from backend (Member 2 contract) ────────────
-  // GET /api/v1/menu/items?category=...&search=...
+  // ── Guard: if no cart state, redirect back to menu ─────────
   useEffect(() => {
-    setMenuLoading(true);
-    const params = new URLSearchParams();
-    if (category) params.set("category", category);
-    if (search)   params.set("search",   search);
-    const qs = params.toString() ? `?${params.toString()}` : "";
-    apiFetch(`/menu${qs}`)
-      .then(data => {
-        // Member 2 wraps in { items: [], total: X }
-        const raw = Array.isArray(data) ? data : (data?.items ?? []);
-        setMenu(raw.map(normaliseItem));
-        setMenuError(null);
-      })
-      .catch(() => {
-        // Graceful fallback — filter mock data locally
-        const filtered = MOCK_MENU.filter(item => {
-          const matchCat = !category || item.category === category;
-          const matchQ   = !search   || item.name.toLowerCase().includes(search.toLowerCase());
-          return matchCat && matchQ;
-        });
-        setMenu(filtered);
-        setMenuError("Backend offline — showing demo data");
-      })
-      .finally(() => setMenuLoading(false));
-  }, [category, search]);
-
-  // ── Cart derived values ───────────────────────────────────
-  const subtotal  = cart.reduce((s, c) => s + c.price * c.qty, 0);
-  const discount  = appliedVoucher ? computeDiscount(appliedVoucher, subtotal) : 0;
-  const total     = Math.max(0, subtotal - discount);
-  const cartCount = cart.reduce((s, c) => s + c.qty, 0);
-
-  const categories = ["", "meals", "beverages", "snacks"]; // matches Member 2
-
-  // ── Cart operations ───────────────────────────────────────
-  const addToCart = (item) => {
-    if (!item.is_available || item.available_stock < 1) return;
-    setCart(prev => {
-      const ex = prev.find(c => c.id === item.id);
-      if (ex) {
-        if (ex.qty + 1 > item.max_order_qty) {
-          showToast(`Maximum ${item.max_order_qty} units for ${item.name}`, "warning");
-          return prev;
-        }
-        return prev.map(c => c.id === item.id ? { ...c, qty: c.qty + 1 } : c);
-      }
-      return [...prev, { ...item, qty: 1 }];
-    });
-    showToast(`${item.name} added to cart`);
-  };
-
-  const updateQty = (id, delta) => {
-    setCart(prev => prev.map(c => {
-      if (c.id !== id) return c;
-      const q = c.qty + delta;
-      if (q < 1) return null;
-      if (q > c.max_order_qty) { showToast(`Max ${c.max_order_qty} units`, "warning"); return c; }
-      return { ...c, qty: q };
-    }).filter(Boolean));
-  };
-
-  const removeItem = (id) => setCart(prev => prev.filter(c => c.id !== id));
-
-  // ── Voucher (FR13, FR15) ──────────────────────────────────
-  const applyVoucher = async () => {
-    const code = voucherCode.trim().toUpperCase();
-    if (!code) return;
-
-    // FR15 — Prevent stacking (mirrors Member 2 MenuPage logic)
-    if (voucherApplied) {
-      setVoucherMsg({ type: "danger", msg: "A voucher has already been applied. Stacking is not allowed." });
-      return;
+    if (incomingCart.length === 0) {
+      addToast("No cart found — redirecting to menu.", "warn");
+      setTimeout(() => navigate("/menu"), 1500);
     }
+  }, []); // eslint-disable-line
 
-    try {
-      // POST /api/cart/<userId>/voucher  (Flask backend)
-      const data = await apiFetch(`/cart/${currentUser.id}/voucher`, {
-        method: "POST",
-        body:   JSON.stringify({ code }),
-      });
-      const v = data.voucher || { code, discount_type: "flat", discount_value: data.discount, min_order: 0 };
-      setApplied(v);
-      setVoucherApplied(true);
-      setVoucherMsg({ type: "success", msg: `Voucher applied! You save ${data.discount} EGP` });
-    } catch {
-      // Fallback — mock vouchers for demo
-      const v = MOCK_VOUCHERS[code];
-      if (!v) { setVoucherMsg({ type: "danger", msg: "Invalid voucher code" }); return; }
-      if (subtotal < v.min_order) { setVoucherMsg({ type: "danger", msg: `Minimum order of ${v.min_order} EGP required` }); return; }
-      setApplied(v);
-      setVoucherApplied(true);
-      setVoucherMsg({ type: "success", msg: `Voucher applied! You save ${computeDiscount(v, subtotal)} EGP` });
-    }
-  };
-
-  const removeVoucher = () => {
-    setApplied(null);
-    setVoucherApplied(false);
-    setVoucherCode("");
-    setVoucherMsg(null);
-  };
-
-  // ── Place Order (FR8, FR9, FR29, FR30, FR31) ─────────────
+  // ── Place order (uses incoming cart from MenuPage) ─────────
   const placeOrder = async () => {
-    const bad = cart.filter(c => !c.is_available);
-    if (bad.length) { showToast(`Unavailable: ${bad.map(i => i.name).join(", ")}`, "danger"); return; }
     setLoading(true);
+    if (!idempKeyRef.current) {
+      idempKeyRef.current = generateIdempotencyKey(currentUser.id);
+    }
+
     try {
-      const idempotency_key = `IDP-${currentUser.id}-${Date.now()}`;
+      // If MenuPage's /cart/lock already returned an order object, use it
+      if (incomingLockedOrder?.id) {
+        const enriched = {
+          ...incomingLockedOrder,
+          items:       incomingCart.map(c => ({
+            ...c,
+            unit_price: c.price,
+            subtotal:   c.price * c.qty,
+          })),
+          subtotal:     incomingSubtotal,
+          discount:     incomingDiscount,
+          total:        incomingTotal,
+          voucher_code: incomingVoucher,
+        };
+        setOrder(enriched);
+        setRetryCount(0);
+        setStep("checkout");
+        setLoading(false);
+        return;
+      }
+
+      // Otherwise create the order now
       const data = await apiFetch("/orders", {
         method: "POST",
-        body:   JSON.stringify({
+        body: JSON.stringify({
           user_id:         currentUser.id,
-          idempotency_key,
-          voucher_code:    appliedVoucher?.code || null,
-          notes:           "",
-          items:           cart.map(c => ({ menu_item_id: c.id, quantity: c.qty })),
+          idempotency_key: idempKeyRef.current,
+          voucher_code:    incomingVoucher,
+          items:           incomingCart.map(c => ({ menu_item_id: c.id, quantity: c.qty })),
         }),
       });
-      // Enrich with local cart data for display (backend may not echo full items)
+
       const enriched = {
         ...data.order,
-        items:        cart.map(c => ({ ...c, unit_price: c.price, subtotal: c.price * c.qty })),
-        subtotal,
-        discount,
-        total,
-        voucher_code: appliedVoucher?.code || null,
+        items:       incomingCart.map(c => ({
+          ...c,
+          unit_price: c.price,
+          subtotal:   c.price * c.qty,
+        })),
+        subtotal:     incomingSubtotal,
+        discount:     incomingDiscount,
+        total:        incomingTotal,
+        voucher_code: incomingVoucher,
       };
       setOrder(enriched);
-      setStep("checkout");
+      setRetryCount(0);
+
     } catch (e) {
-      const msg = e?.message || e?.error || "Failed to place order";
-      if (msg.includes("SYSTEM_OVERLOADED")) {
-        showToast("We are experiencing high demand. Please try again shortly.", "warning");
+      const code = e?.code || "";
+      if (code === "SYSTEM_OVERLOADED" || e?.http_status === 503) {
+        addToast(`${LOAD_SHED_MESSAGE} (retry in ${e?.retry_after || 30}s)`, "warn");
+      } else if (code === "OVERSELL_PREVENTED") {
+        addToast("Sorry, an item just sold out. Please update your cart.", "error");
+        setTimeout(() => navigate("/menu"), 2000);
       } else {
-        showToast(msg, "danger");
+        addToast(e?.message || "Failed to place order.", "error");
       }
     } finally {
       setLoading(false);
     }
   };
 
-  // ── Start Payment (FR10, FR24) ────────────────────────────
+  // Place the order as soon as the component mounts
+  useEffect(() => {
+    if (incomingCart.length > 0) placeOrder();
+  }, []); // eslint-disable-line
+
+  // ── Start payment ──────────────────────────────────────────
   const startPayment = async () => {
     setPayState("processing");
-    setTimeLeft(PAY_TIMEOUT_SECS);
+    setTimeLeft(PAY_TIMEOUT_SECONDS);
     setStep("payment");
     setPayError(null);
     setLoading(true);
     try {
       const data = await apiFetch("/payments/process", {
         method: "POST",
-        body:   JSON.stringify({ order_id: order.id, payment_method: payMethod }),
+        body:   JSON.stringify({
+          order_id:        order.id,
+          payment_method:  payMethod,
+          idempotency_key: generateIdempotencyKey(order.id),
+        }),
       });
       setPaymentId(data.payment_id || data.payment?.id || null);
-      // Cash / Wallet / Meal Plan confirm immediately
       if (payMethod !== "online") {
         setPayState("success");
-        setOrder(o => o ? { ...o, status: "confirmed", confirmed_at: new Date().toISOString() } : o);
+        setOrder(o => o ? { ...o, status:"confirmed", confirmed_at: new Date().toISOString() } : o);
       }
     } catch (e) {
-      setPayState("failed");
-      setPayError(e?.message || "Payment initiation failed");
+      if (e?.code === "INSUFFICIENT_MEAL_PLAN_BALANCE") {
+        setPayState("failed");
+        setPayError({
+          message:         "Insufficient Meal Plan balance.",
+          current_balance: e.current_balance_egp,
+          required:        e.required_egp,
+          shortfall:       e.shortfall_egp,
+          code:            e.code,
+        });
+      } else {
+        setPayState("failed");
+        setPayError({ message: e?.message || "Payment initiation failed.", code: e?.code });
+      }
     } finally {
       setLoading(false);
     }
   };
 
-  // ── FR24 – Countdown timer ────────────────────────────────
+  // ── Payment countdown ──────────────────────────────────────
   useEffect(() => {
     if (step !== "payment" || payState !== "processing" || payMethod !== "online") return;
     timerRef.current = setInterval(() => {
@@ -321,7 +335,7 @@ export default function OrderPaymentApp() {
         if (t <= 1) {
           clearInterval(timerRef.current);
           setPayState("timeout");
-          setOrder(o => o ? { ...o, status: "payment_timeout" } : o);
+          setOrder(o => o ? { ...o, status:"payment_timeout" } : o);
           return 0;
         }
         return t - 1;
@@ -330,7 +344,7 @@ export default function OrderPaymentApp() {
     return () => clearInterval(timerRef.current);
   }, [step, payState, payMethod]);
 
-  // ── Confirm payment (gateway Pay button) ─────────────────
+  // ── Confirm payment ────────────────────────────────────────
   const confirmOrder = async () => {
     clearInterval(timerRef.current);
     setLoading(true);
@@ -338,96 +352,100 @@ export default function OrderPaymentApp() {
       if (paymentId) {
         await apiFetch(`/payments/${paymentId}/callback`, {
           method: "POST",
-          body:   JSON.stringify({ success: true, transaction_id: `TXN-${Date.now()}` }),
+          body:   JSON.stringify({ success:true, transaction_id:`TXN-${Date.now()}` }),
         });
       }
       setPayState("success");
-      setOrder(o => o ? { ...o, status: "confirmed", confirmed_at: new Date().toISOString() } : o);
+      setOrder(o => o ? { ...o, status:"confirmed", confirmed_at:new Date().toISOString() } : o);
     } catch (e) {
       setPayState("failed");
-      setPayError(e?.message || "Payment confirmation failed");
+      setPayError({ message: e?.message || "Payment confirmation failed.", code: e?.code });
     } finally {
       setLoading(false);
     }
   };
 
-  // ── FR12 – Simulate gateway failure ──────────────────────
+  // ── Simulate gateway failure (demo) ───────────────────────
   const simulateFailure = async (reason) => {
     clearInterval(timerRef.current);
     if (paymentId) {
       try {
         await apiFetch(`/payments/${paymentId}/callback`, {
-          method: "POST",
-          body:   JSON.stringify({ success: false, failure_reason: reason }),
+          method:"POST", body: JSON.stringify({ success:false, failure_reason:reason }),
         });
       } catch {}
     }
     setPayState("failed");
-    setPayError({
-      insufficient_funds: "Payment declined: Insufficient funds",
-      card_expired:       "Payment declined: Card expired",
-      gateway_error:      "Payment service unavailable. Please try again",
-    }[reason] || "Payment declined");
+    const msgs = {
+      insufficient_funds: "Payment declined — insufficient funds.",
+      card_expired:       "Payment declined — card expired.",
+      gateway_error:      "Payment service unavailable. Please try again.",
+    };
+    setPayError({ message: msgs[reason] || "Payment declined.", code: reason.toUpperCase() });
   };
 
-  // ── FR12 – Retry payment ──────────────────────────────────
+  // ── Retry payment ──────────────────────────────────────────
   const retryPayment = async () => {
+    if (retryCount >= MAX_PAYMENT_RETRIES) {
+      addToast("Maximum retry attempts reached. Please contact support.", "error");
+      setPayError({ message: "Maximum retry attempts reached.", code:"MAX_RETRIES_EXCEEDED" });
+      return;
+    }
     setLoading(true);
     try {
       if (paymentId) {
-        const d = await apiFetch(`/payments/${paymentId}/retry`, { method: "POST" });
+        const d = await apiFetch(`/payments/${paymentId}/retry`, { method:"POST" });
         setPaymentId(d.payment_id);
       }
+      setRetryCount(c => c + 1);
       setPayState("processing");
       setPayError(null);
-      setTimeLeft(PAY_TIMEOUT_SECS);
+      setTimeLeft(PAY_TIMEOUT_SECONDS);
       if (payMethod !== "online") setTimeout(() => confirmOrder(), 800);
     } catch (e) {
-      if (e?.message === "MAX_RETRIES_EXCEEDED") {
-        showToast("Maximum retry attempts reached. Please contact support.", "danger");
+      if (e?.code === "MAX_RETRIES_EXCEEDED") {
+        addToast("Maximum retry attempts reached.", "error");
         setPayState("failed");
-        setPayError("Maximum retry attempts reached.");
+        setPayError({ message:"Maximum retry attempts reached.", code:"MAX_RETRIES_EXCEEDED" });
       } else {
-        showToast(e?.message || "Retry failed", "danger");
+        addToast(e?.message || "Retry failed.", "error");
       }
     } finally {
       setLoading(false);
     }
   };
 
-  // ── FR14, FR26 – Cancel order ─────────────────────────────
+  // ── Cancel order ───────────────────────────────────────────
   const handleCancel = async () => {
     setLoading(true);
     try {
-      const data = await apiFetch(`/orders/${order.id}/cancel`, { method: "PUT" });
+      const data = await apiFetch(`/orders/${order.id}/cancel`, { method:"PUT" });
       if (data.success) {
-        setOrder(o => ({ ...o, status: "cancelled", cancelled_at: new Date().toISOString() }));
+        setOrder(o => ({ ...o, status:"cancelled", cancelled_at:new Date().toISOString() }));
         setCancelModal(false);
-        showToast("Order cancelled successfully");
-        setTimeout(() => { setStep("cart"); setCart([]); setOrder(null); setPayState("idle"); }, 1500);
-      } else if (data.code === "CANCELLATION_WINDOW_PASSED") {
+        addToast("Order cancelled successfully.", "success");
+        setTimeout(() => navigate("/menu"), 1500);
+      } else if (data.code === "CANCELLATION_WINDOW_EXPIRED") {
         setCancelModal(false);
         setPartialModal(true);
       } else {
-        showToast(data.message || "Cannot cancel at this stage", "danger");
+        addToast(data.message || "Cannot cancel at this stage.", "error");
         setCancelModal(false);
       }
-    } catch (e) {
-      // Fallback to local logic if backend unreachable
-      const status = order?.status;
-      if (status === "pending_payment") {
-        setOrder(o => ({ ...o, status: "cancelled" }));
+    } catch {
+      if (order?.status === "pending_payment") {
+        setOrder(o => ({ ...o, status:"cancelled" }));
         setCancelModal(false);
-        showToast("Order cancelled");
-        setTimeout(() => { setStep("cart"); setCart([]); setOrder(null); setPayState("idle"); }, 1500);
-      } else if (status === "confirmed") {
-        const confirmedAt = new Date(order.confirmed_at);
-        const windowEnd   = new Date(confirmedAt.getTime() + CANCEL_WINDOW_MS);
-        if (new Date() <= windowEnd) {
-          setOrder(o => ({ ...o, status: "cancelled" }));
+        addToast("Order cancelled.", "success");
+        setTimeout(() => navigate("/menu"), 1500);
+      } else if (order?.status === "confirmed") {
+        const placed = new Date(order.confirmed_at);
+        const withinWindow = (Date.now() - placed.getTime()) / 1000 < CANCEL_WINDOW_SECS;
+        if (withinWindow) {
+          setOrder(o => ({ ...o, status:"cancelled" }));
           setCancelModal(false);
-          showToast("Order cancelled. Refund initiated.");
-          setTimeout(() => { setStep("cart"); setCart([]); setOrder(null); setPayState("idle"); }, 1500);
+          addToast("Order cancelled. Refund initiated.", "success");
+          setTimeout(() => navigate("/menu"), 1500);
         } else {
           setCancelModal(false);
           setPartialModal(true);
@@ -438,697 +456,644 @@ export default function OrderPaymentApp() {
     }
   };
 
-  // ── FR26 – Confirm partial refund ─────────────────────────
   const confirmPartialRefund = async () => {
     setLoading(true);
-    try {
-      await apiFetch(`/orders/${order.id}/cancel/confirm-partial`, { method: "PUT" });
-    } catch {}
+    try { await apiFetch(`/orders/${order.id}/cancel/confirm-partial`, { method:"PUT" }); } catch {}
     const amt = ((order?.total || 0) * 0.5).toFixed(2);
-    setOrder(o => ({ ...o, status: "cancelled" }));
+    setOrder(o => ({ ...o, status:"cancelled" }));
     setPartialModal(false);
-    showToast(`50% refund (${amt} EGP) initiated.`, "info");
-    setTimeout(() => { setStep("cart"); setCart([]); setOrder(null); setPayState("idle"); }, 2000);
+    addToast(`50% refund (${amt} EGP) initiated.`, "warn");
+    setTimeout(() => navigate("/menu"), 2000);
     setLoading(false);
   };
 
-  // ── FR16 – Staff status update ────────────────────────────
   const simulateStatusUpdate = async (newStatus) => {
     try {
       await apiFetch(`/orders/${order.id}/status`, {
-        method: "PUT",
-        body:   JSON.stringify({ status: newStatus }),
+        method:"PUT", body: JSON.stringify({ status:newStatus }),
       });
     } catch {}
-    setOrder(o => o ? { ...o, status: newStatus } : o);
-    showToast(`Status → ${STATUS_LABELS[newStatus]}`);
+    setOrder(o => o ? { ...o, status:newStatus } : o);
+    addToast(`Status → ${STATUS_META[newStatus]?.label || newStatus}`, "success");
   };
+
+  // ── Go back to menu (new order) ────────────────────────────
+  const goBackToMenu = () => navigate("/menu");
 
   // ─────────────────────────────────────────────────────────
   // RENDER
   // ─────────────────────────────────────────────────────────
   return (
-    <div style={{ fontFamily: "'DM Sans', sans-serif", background: "#f0f4f8", minHeight: "100vh" }}>
+    <>
+      <style>{OP_CSS}</style>
+      <div className="op-page">
+        <div className="uc-mesh"  aria-hidden="true" />
+        <div className="uc-grid"  aria-hidden="true" />
 
-      {/* ── Styles ── */}
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Space+Grotesk:wght@600;700&display=swap');
-        :root {
-          --brand:#1a56db; --brand-dk:#1347c5; --success:#0ea770;
-          --danger:#e53e3e; --warning:#d97706; --muted:#6b7280; --border:#e2e8f0;
-        }
-        .step-indicator { display:flex; align-items:center; }
-        .step-dot { width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:600; }
-        .step-line { flex:1; height:3px; background:var(--border); }
-        .step-line.done { background:var(--brand); }
-        .menu-card { transition:transform .15s,box-shadow .15s; }
-        .menu-card:hover { transform:translateY(-3px); box-shadow:0 8px 24px rgba(26,86,219,.12)!important; }
-        .cart-item { border-left:3px solid var(--brand); }
-        .qty-btn { width:30px; height:30px; border-radius:50%; border:1.5px solid var(--border); background:#fff; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:16px; transition:all .12s; }
-        .qty-btn:hover { background:var(--brand); color:#fff; border-color:var(--brand); }
-        .pay-method { border:2px solid var(--border); border-radius:12px; padding:14px 18px; cursor:pointer; transition:all .15s; }
-        .pay-method.selected { border-color:var(--brand); background:#eff4ff; }
-        .pay-method:hover:not(.selected) { border-color:#93c5fd; }
-        .section-title { font-family:'Space Grotesk',sans-serif; font-size:22px; font-weight:700; color:#1e293b; }
-        .brand-text { font-family:'Space Grotesk',sans-serif; font-weight:700; }
-        .badge-status { padding:5px 12px; border-radius:20px; font-size:12px; font-weight:600; }
-        .toast-container { position:fixed; top:20px; right:20px; z-index:9999; min-width:280px; }
-        .timer-ring { font-variant-numeric:tabular-nums; font-family:'Space Grotesk',sans-serif; }
-        .offline-banner { background:#fef3c7; border:1.5px solid #fde68a; border-radius:10px; padding:10px 14px; font-size:12px; color:#92400e; margin-bottom:12px; }
-      `}</style>
-
-      {/* ── Toast ── */}
-      {toast && (
-        <div className="toast-container">
-          <div className={`toast show align-items-center border-0 text-bg-${
-            toast.type === "success" ? "success" :
-            toast.type === "danger"  ? "danger"  :
-            toast.type === "info"    ? "primary"  : "warning"}`}>
-            <div className="d-flex">
-              <div className="toast-body">{toast.msg}</div>
-              <button className="btn-close btn-close-white me-2 m-auto" onClick={() => setToast(null)} />
-            </div>
+        {/* ── Navbar ── */}
+        <nav className="mp-nav">
+          <div className="mp-nav-brand">
+            <div className="mp-nav-logo">🍽️</div>
+            <span className="mp-nav-name">CampusBite</span>
           </div>
-        </div>
-      )}
-
-      {/* ── Navbar ── */}
-      <nav style={{ background: "var(--brand)", padding: "14px 0", boxShadow: "0 2px 12px rgba(26,86,219,.3)" }}>
-        <div className="container d-flex justify-content-between align-items-center">
-          <span className="brand-text text-white" style={{ fontSize: 20 }}>🍽️ CampusBite</span>
-          <div className="d-flex align-items-center gap-3">
-            <span className="text-white opacity-75" style={{ fontSize: 13 }}>
-              {currentUser.name}
-              {currentUser.role !== "student" && (
-                <span className="badge bg-warning text-dark ms-2" style={{ fontSize: 10 }}>
-                  {currentUser.role.toUpperCase()}
-                </span>
-              )}
-            </span>
-            <button className="btn btn-light btn-sm position-relative" onClick={() => setStep("cart")}>
-              🛒 Cart
-              {cartCount > 0 && (
-                <span className="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger" style={{ fontSize: 10 }}>
-                  {cartCount}
-                </span>
-              )}
+          <div className="mp-nav-actions">
+            <button className="op-back-btn" onClick={goBackToMenu}>
+              <i className="bi bi-arrow-left me-1" /> Back to Menu
+            </button>
+            <button className="mp-logout-btn" onClick={() => {
+              localStorage.removeItem("jwt_token");
+              localStorage.removeItem("user");
+              navigate("/");
+            }} title="Sign out">
+              <i className="bi bi-box-arrow-right" />
             </button>
           </div>
-        </div>
-      </nav>
+        </nav>
 
-      {/* ── Step bar ── */}
-      <div style={{ background: "#fff", borderBottom: "1px solid var(--border)", padding: "14px 0" }}>
-        <div className="container" style={{ maxWidth: 600 }}>
-          <div className="step-indicator">
-            {STEPS.map((s, i) => {
-              const idx = STEPS.indexOf(step), done = i < idx, active = i === idx;
-              return (
-                <div key={s} style={{ display: "contents" }}>
-                  <div className="d-flex flex-column align-items-center gap-1">
-                    <div className="step-dot" style={{
-                      background: done || active ? "var(--brand)" : "#e2e8f0",
-                      color:      done || active ? "#fff" : "#94a3b8",
-                    }}>
-                      {done ? "✓" : i + 1}
+        {/* ── Step bar ── */}
+        <div className="op-stepbar-wrap">
+          <StepBar step={step} />
+        </div>
+
+        <div className="op-body">
+
+          {/* ══ LOADING / PLACING ORDER ══ */}
+          {loading && !order && step === "checkout" && (
+            <div className="op-centered">
+              <div className="op-loading">
+                <div className="op-spinner" />
+                <span>Placing your order…</span>
+              </div>
+            </div>
+          )}
+
+          {/* ══ CHECKOUT STEP ══ */}
+          {step === "checkout" && order && (
+            <div className="op-centered">
+              <div className="op-card">
+                <h2 className="op-card-title"><i className="bi bi-receipt me-2" />Order Summary</h2>
+
+                <div className="op-order-items">
+                  {order.items.map((item, idx) => (
+                    <div key={item.id || item.menu_item_id || idx} className="op-order-item">
+                      <span>
+                        {item.image_url || "🍽️"} {item.name}
+                        <span className="op-item-qty"> ×{item.qty || item.quantity}</span>
+                      </span>
+                      <span className="op-order-item-price">
+                        {Number(item.subtotal || item.price * item.qty).toFixed(0)} EGP
+                      </span>
                     </div>
-                    <span style={{ fontSize: 11, color: active ? "var(--brand)" : "#94a3b8", fontWeight: active ? 600 : 400 }}>
-                      {s.charAt(0).toUpperCase() + s.slice(1)}
-                    </span>
-                  </div>
-                  {i < STEPS.length - 1 && <div className={`step-line${i < idx ? " done" : ""}`} />}
+                  ))}
                 </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
 
-      <div className="container py-4" style={{ maxWidth: 1100 }}>
+                <div className="op-totals">
+                  <div className="op-totals-row">
+                    <span>Subtotal</span>
+                    <span>{Number(order.subtotal).toFixed(2)} EGP</span>
+                  </div>
+                  {order.discount > 0 && (
+                    <div className="op-totals-row op-totals-row--disc">
+                      <span><i className="bi bi-tag-fill me-1" />Discount{order.voucher_code ? ` (${order.voucher_code})` : ""}</span>
+                      <span>−{Number(order.discount).toFixed(2)} EGP</span>
+                    </div>
+                  )}
+                  <div className="op-totals-row op-totals-total">
+                    <span>Total</span>
+                    <span>{Number(order.total).toFixed(2)} EGP</span>
+                  </div>
+                </div>
 
-        {/* ══════════════ CART / MENU ══════════════ */}
-        {step === "cart" && (
-          <div className="row g-4">
+                <h3 className="op-section-label">Payment Method</h3>
+                <div className="op-pay-methods">
+                  {[
+                    { id:"online",    icon:"bi-credit-card-2-front-fill", label:"Online Payment",  desc:"Credit / debit card" },
+                    { id:"cash",      icon:"bi-cash-coin",                 label:"Cash on Pickup",  desc:"Pay when you collect" },
+                    { id:"wallet",    icon:"bi-wallet2",                   label:"Wallet",           desc:"Digital wallet balance" },
+                    { id:"meal_plan", icon:"bi-mortarboard-fill",          label:"Meal Plan",        desc:"University meal credits" },
+                  ].map(m => (
+                    <button key={m.id}
+                      className={`op-pay-method ${payMethod === m.id ? "op-pay-method--active" : ""}`}
+                      onClick={() => setPayMethod(m.id)}>
+                      <i className={`bi ${m.icon} op-pay-icon`} />
+                      <div>
+                        <div className="op-pay-label">{m.label}</div>
+                        <div className="op-pay-desc">{m.desc}</div>
+                      </div>
+                      {payMethod === m.id && <i className="bi bi-check-circle-fill op-pay-check" />}
+                    </button>
+                  ))}
+                </div>
 
-            {/* Menu panel */}
-            <div className="col-lg-7">
-              <div className="section-title mb-3">🍽️ Cafeteria Menu</div>
-
-              {menuError && (
-                <div className="offline-banner">⚠️ {menuError}</div>
-              )}
-
-              {/* Search — FR09/FR10 matching Member 2 */}
-              <div className="input-group mb-3">
-                <input
-                  className="form-control"
-                  placeholder="Search menu..."
-                  value={search}
-                  onChange={e => setSearch(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && setSearch(e.target.value)}
-                  style={{ fontSize: 14 }}
-                />
-                <button className="btn btn-primary" onClick={() => setSearch(search)}>Search</button>
-              </div>
-
-              {/* Category filter — same labels as Member 2 */}
-              <div className="mb-4 d-flex gap-2 flex-wrap">
-                {categories.map(cat => (
-                  <button
-                    key={cat}
-                    className={`btn ${category === cat ? "btn-dark" : "btn-outline-dark"} btn-sm`}
-                    onClick={() => setCategory(cat)}
-                  >
-                    {cat === "" ? "All" : cat.charAt(0).toUpperCase() + cat.slice(1)}
+                <div className="op-card-actions">
+                  <button className="op-ghost-btn" onClick={goBackToMenu}>
+                    <i className="bi bi-arrow-left me-1" />Back to Menu
                   </button>
-                ))}
+                  <button className="op-primary-btn" onClick={startPayment} disabled={loading}>
+                    {loading
+                      ? <><span className="op-spinner-sm" /> Processing…</>
+                      : <>Proceed to Payment <i className="bi bi-arrow-right ms-1" /></>}
+                  </button>
+                </div>
               </div>
+            </div>
+          )}
 
-              {menuLoading
-                ? <div className="text-center py-5"><div className="spinner-border text-primary" /></div>
-                : (
-                  <div className="row g-3">
-                    {menu.length === 0 && (
-                      <div className="col-12 text-center text-muted py-4">No items found.</div>
+          {/* ══ PAYMENT STEP ══ */}
+          {step === "payment" && order && (
+            <div className="op-centered">
+              <div className="op-card op-card--narrow">
+
+                {/* Processing (online) */}
+                {payState === "processing" && payMethod === "online" && (
+                  <>
+                    <div className="op-pay-hero">
+                      <div className="op-pay-icon-wrap"><i className="bi bi-shield-lock-fill" /></div>
+                      <h2 className="op-card-title">Secure Payment</h2>
+                      <p className="op-pay-amount">{Number(order.total).toFixed(2)} EGP</p>
+                    </div>
+
+                    <div className="op-countdown">
+                      <i className="bi bi-clock" />
+                      <span>Session expires in </span>
+                      <span className="op-countdown-timer">{fmtTime(timeLeft||0)}</span>
+                    </div>
+
+                    <div className="op-card-form">
+                      <div className="op-field">
+                        <label className="op-field-label">Card Number</label>
+                        <input className="op-input" placeholder="4111 1111 1111 1111" style={{fontFamily:"monospace"}} />
+                      </div>
+                      <div className="op-field-row">
+                        <div className="op-field">
+                          <label className="op-field-label">Expiry</label>
+                          <input className="op-input" placeholder="MM / YY" />
+                        </div>
+                        <div className="op-field">
+                          <label className="op-field-label">CVV</label>
+                          <input className="op-input" placeholder="•••" />
+                        </div>
+                      </div>
+                    </div>
+
+                    <button className="op-primary-btn op-primary-btn--green" onClick={confirmOrder} disabled={loading}>
+                      {loading
+                        ? <><span className="op-spinner-sm" /> Confirming…</>
+                        : <>Pay {Number(order.total).toFixed(2)} EGP</>}
+                    </button>
+
+                    {retryCount > 0 && (
+                      <p className="op-retry-hint">Attempt {retryCount + 1} of {MAX_PAYMENT_RETRIES + 1}</p>
                     )}
-                    {menu.map(item => {
-                      const inCart = cart.find(c => c.id === item.id);
+
+                    <div className="op-sim-row">
+                      <span className="op-sim-label">Simulate failure:</span>
+                      <button className="op-sim-btn" onClick={() => simulateFailure("insufficient_funds")}>NSF</button>
+                      <button className="op-sim-btn" onClick={() => simulateFailure("card_expired")}>Expired</button>
+                      <button className="op-sim-btn" onClick={() => simulateFailure("gateway_error")}>Gateway</button>
+                    </div>
+                  </>
+                )}
+
+                {/* Processing (non-online) */}
+                {payState === "processing" && payMethod !== "online" && (
+                  <div className="op-pay-hero">
+                    <div className="op-spinner op-spinner--lg" />
+                    <p>Processing {payMethod.replace("_"," ")} payment…</p>
+                  </div>
+                )}
+
+                {/* Success */}
+                {payState === "success" && (
+                  <div className="op-pay-hero">
+                    <div className="op-pay-icon-wrap op-pay-icon-wrap--success"><i className="bi bi-check-lg" /></div>
+                    <h2 className="op-card-title" style={{color:"var(--uc-acc2)"}}>Payment Confirmed!</h2>
+                    <p className="op-muted">Order #{order.id}</p>
+                    <p className="op-muted" style={{marginBottom:20}}>Your order is confirmed and being prepared.</p>
+                    <button className="op-primary-btn op-primary-btn--green" onClick={() => setStep("tracking")}>
+                      Track My Order <i className="bi bi-arrow-right ms-1" />
+                    </button>
+                  </div>
+                )}
+
+                {/* Failed */}
+                {payState === "failed" && (
+                  <div className="op-pay-hero">
+                    <div className="op-pay-icon-wrap op-pay-icon-wrap--danger"><i className="bi bi-x-lg" /></div>
+                    <h2 className="op-card-title" style={{color:"var(--uc-danger)"}}>Payment Failed</h2>
+
+                    <div className="op-err-box">
+                      <p className="op-err-msg">{payError?.message}</p>
+                      {payError?.code === "INSUFFICIENT_MEAL_PLAN_BALANCE" && payError.shortfall && (
+                        <div className="op-balance-breakdown">
+                          <div><span>Your balance</span><span>{payError.current_balance?.toFixed(2)} EGP</span></div>
+                          <div><span>Order total</span><span>{payError.required?.toFixed(2)} EGP</span></div>
+                          <div className="op-shortfall"><span>Shortfall</span><span style={{color:"var(--uc-danger)"}}>−{payError.shortfall?.toFixed(2)} EGP</span></div>
+                        </div>
+                      )}
+                    </div>
+
+                    {retryCount < MAX_PAYMENT_RETRIES ? (
+                      <div className="op-card-actions" style={{marginTop:16}}>
+                        <button className="op-ghost-btn" onClick={() => setStep("checkout")}>Change Method</button>
+                        <button className="op-primary-btn" onClick={retryPayment} disabled={loading}>
+                          {loading
+                            ? <><span className="op-spinner-sm" /> Retrying…</>
+                            : `Retry (${MAX_PAYMENT_RETRIES - retryCount} left)`}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="op-err-box" style={{marginTop:12}}>
+                        <p className="op-err-msg">Maximum retry attempts reached. Please contact support.</p>
+                        <button className="op-ghost-btn" style={{marginTop:10,width:"100%"}} onClick={() => setStep("checkout")}>
+                          Change Payment Method
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Timeout */}
+                {payState === "timeout" && (
+                  <div className="op-pay-hero">
+                    <div className="op-pay-icon-wrap op-pay-icon-wrap--warn"><i className="bi bi-alarm-fill" /></div>
+                    <h2 className="op-card-title" style={{color:"var(--uc-warn)"}}>Session Expired</h2>
+                    <p className="op-muted" style={{marginBottom:20}}>Your payment session timed out. Your cart is preserved.</p>
+                    <button className="op-primary-btn" onClick={retryPayment} disabled={loading}>
+                      {loading ? <><span className="op-spinner-sm" /> Restarting…</> : "Restart Payment"}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ══ TRACKING STEP ══ */}
+          {step === "tracking" && order && (
+            <div className="op-centered">
+              <div className="op-card">
+                <div className="op-tracking-hd">
+                  <div>
+                    <h2 className="op-card-title"><i className="bi bi-box-seam me-2" />Order Tracking</h2>
+                    <p className="op-muted" style={{fontSize:12}}>#{order.id}</p>
+                  </div>
+                  {(() => {
+                    const m = STATUS_META[order.status] || { label:order.status, color:"var(--uc-muted)", icon:"bi-circle" };
+                    return (
+                      <span className="op-status-chip" style={{color:m.color, background:`${m.color}18`, borderColor:`${m.color}33`}}>
+                        <i className={`bi ${m.icon}`} /> {m.label}
+                      </span>
+                    );
+                  })()}
+                </div>
+
+                {/* Progress timeline */}
+                {!["cancelled","payment_timeout","payment_failed"].includes(order.status) && (
+                  <div className="op-timeline">
+                    {[
+                      { s:"confirmed",        icon:"bi-check-circle-fill", label:"Confirmed"        },
+                      { s:"preparing",        icon:"bi-fire",              label:"Preparing"        },
+                      { s:"ready_for_pickup", icon:"bi-bag-check-fill",    label:"Ready for Pickup" },
+                      { s:"delivered",        icon:"bi-check2-all",        label:"Delivered"        },
+                    ].map((t, i, arr) => {
+                      const ord  = arr.map(x => x.s);
+                      const done = ord.indexOf(t.s) <= ord.indexOf(order.status);
                       return (
-                        <div key={item.id} className="col-sm-6">
-                          <div
-                            className={`card menu-card h-100 border-0 shadow-sm ${!item.is_available ? "opacity-50" : ""}`}
-                            style={{ borderRadius: 14 }}
-                          >
-                            <div className="card-body p-3">
-                              <div className="d-flex justify-content-between align-items-start mb-2">
-                                <span style={{ fontSize: 36 }}>{item.image_url}</span>
-                                {item.is_available
-                                  ? <span className="badge bg-success" style={{ fontSize: 10 }}>In Stock ({item.available_stock})</span>
-                                  : <span className="badge bg-danger"  style={{ fontSize: 10 }}>Out of Stock</span>
-                                }
-                              </div>
-                              <div className="fw-bold mb-1" style={{ fontSize: 15 }}>{item.name}</div>
-                              <div className="text-muted" style={{ fontSize: 12, marginBottom: 4 }}>
-                                <span className="badge bg-secondary text-capitalize me-1">{item.category}</span>
-                                {item.description}
-                              </div>
-                              <div className="d-flex justify-content-between align-items-center mt-2">
-                                <span className="fw-bold" style={{ color: "var(--brand)", fontSize: 16 }}>{item.price} EGP</span>
-                                {item.is_available
-                                  ? inCart
-                                    ? (
-                                      <div className="d-flex align-items-center gap-2">
-                                        <button className="qty-btn" onClick={() => updateQty(item.id, -1)}>−</button>
-                                        <span className="fw-bold">{inCart.qty}</span>
-                                        <button className="qty-btn" onClick={() => addToCart(item)}>+</button>
-                                      </div>
-                                    )
-                                    : <button className="btn btn-primary btn-sm" onClick={() => addToCart(item)} style={{ fontSize: 12, borderRadius: 8 }}>Add to Cart</button>
-                                  : <span className="text-muted" style={{ fontSize: 12 }}>Unavailable</span>
-                                }
-                              </div>
-                            </div>
+                        <div key={t.s} style={{display:"contents"}}>
+                          <div className={`op-tl-node ${done?"op-tl-node--done":""}`}>
+                            <i className={`bi ${t.icon}`} />
                           </div>
+                          <div>
+                            <div className={`op-tl-label ${done?"op-tl-label--done":""}`}>{t.label}</div>
+                            {done && <div className="op-tl-sub">Completed</div>}
+                          </div>
+                          {i < arr.length-1 && <div className={`op-tl-line ${done?"op-tl-line--done":""}`} style={{gridColumn:"span 2"}} />}
                         </div>
                       );
                     })}
                   </div>
                 )}
-            </div>
 
-            {/* Cart sidebar */}
-            <div className="col-lg-5">
-              <div className="card border-0 shadow-sm sticky-top" style={{ borderRadius: 16, top: 20 }}>
-                <div className="card-body p-4">
-                  <div className="section-title mb-3">🛒 Your Cart</div>
+                {order.status === "cancelled" && (
+                  <div className="op-cancelled-box">
+                    <i className="bi bi-x-circle-fill" style={{fontSize:32, color:"var(--uc-danger)"}} />
+                    <p className="op-cancelled-title">Order Cancelled</p>
+                    {["online","wallet","meal_plan"].includes(order.payment_method) && (
+                      <p className="op-muted">Refund will be processed within 3–5 business days.</p>
+                    )}
+                  </div>
+                )}
 
-                  {cart.length === 0 ? (
-                    <div className="text-center py-4">
-                      <div style={{ fontSize: 48 }}>🛒</div>
-                      <div className="text-muted mt-2">Your cart is empty.</div>
+                {/* Staff panel */}
+                {!["cancelled","delivered","payment_timeout"].includes(order.status) && (
+                  <div className="op-staff-panel">
+                    <div className="op-staff-panel-title">
+                      <i className="bi bi-person-badge-fill me-2" />Staff — Update Status
                     </div>
-                  ) : (
-                    <>
-                      <div className="d-flex flex-column gap-2 mb-3">
-                        {cart.map(item => (
-                          <div key={item.id} className="cart-item p-3 rounded-3" style={{ background: "#f8fafc" }}>
-                            <div className="d-flex justify-content-between align-items-center">
-                              <div>
-                                <div className="fw-bold" style={{ fontSize: 14 }}>{item.image_url} {item.name}</div>
-                                <div className="text-muted" style={{ fontSize: 12 }}>{item.price} EGP × {item.qty}</div>
-                              </div>
-                              <div className="d-flex align-items-center gap-2">
-                                <span className="fw-bold" style={{ color: "var(--brand)", fontSize: 14 }}>{(item.price * item.qty).toFixed(0)} EGP</span>
-                                <button className="qty-btn" onClick={() => removeItem(item.id)} style={{ fontSize: 12 }}>✕</button>
-                              </div>
-                            </div>
-                            <div className="d-flex align-items-center gap-2 mt-2">
-                              <button className="qty-btn" onClick={() => updateQty(item.id, -1)}>−</button>
-                              <span className="fw-bold" style={{ fontSize: 13 }}>{item.qty}</span>
-                              <button className="qty-btn" onClick={() => addToCart(item)}>+</button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                    <div className="op-staff-actions">
+                      {["preparing","ready_for_pickup","delivered"].map(s => (
+                        <button key={s} className="op-staff-btn" onClick={() => simulateStatusUpdate(s)}>
+                          → {STATUS_META[s]?.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
-                      {/* Voucher — FR13, FR15 */}
-                      <div className="mb-3">
-                        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>🏷️ Voucher Code</div>
-                        {voucherApplied ? (
-                          <div className="d-flex align-items-center justify-content-between p-2 rounded-3"
-                            style={{ background: "#f0fdf4", border: "1.5px solid #bbf7d0" }}>
-                            <span style={{ fontSize: 13, color: "var(--success)", fontWeight: 600 }}>✓ {appliedVoucher?.code} applied</span>
-                            <button className="btn btn-sm btn-outline-danger" style={{ fontSize: 11 }} onClick={removeVoucher}>Remove</button>
-                          </div>
-                        ) : (
-                          <div className="d-flex gap-2">
-                            <input
-                              className="form-control form-control-sm"
-                              placeholder="Enter code"
-                              value={voucherCode}
-                              onChange={e => setVoucherCode(e.target.value.toUpperCase())}
-                              style={{ letterSpacing: 1 }}
-                            />
-                            <button className="btn btn-outline-primary btn-sm" onClick={applyVoucher}>Apply</button>
-                          </div>
-                        )}
-                        {voucherMsg && (
-                          <div className={`mt-2 small text-${voucherMsg.type === "success" ? "success" : "danger"}`}>
-                            {voucherMsg.msg}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Totals */}
-                      <div className="border-top pt-3">
-                        <div className="d-flex justify-content-between mb-1">
-                          <span className="text-muted" style={{ fontSize: 13 }}>Subtotal</span>
-                          <span style={{ fontSize: 13 }}>{subtotal.toFixed(2)} EGP</span>
-                        </div>
-                        {discount > 0 && (
-                          <div className="d-flex justify-content-between mb-1">
-                            <span style={{ fontSize: 13, color: "var(--success)" }}>Discount</span>
-                            <span style={{ fontSize: 13, color: "var(--success)" }}>−{discount.toFixed(2)} EGP</span>
-                          </div>
-                        )}
-                        <div className="d-flex justify-content-between fw-bold border-top pt-2 mt-1" style={{ fontSize: 18 }}>
-                          <span>Total</span>
-                          <span style={{ color: "var(--brand)" }}>{total.toFixed(2)} EGP</span>
-                        </div>
-                      </div>
-
-                      <button
-                        className="btn btn-success w-100 mt-3 py-2 fw-bold"
-                        onClick={placeOrder}
-                        disabled={loading || cart.length === 0}
-                        style={{ borderRadius: 10, fontSize: 15 }}
-                      >
-                        {loading && <span className="spinner-border spinner-border-sm me-2" />}
-                        Proceed to Checkout
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ══════════════ CHECKOUT ══════════════ */}
-        {step === "checkout" && order && (
-          <div className="row justify-content-center">
-            <div className="col-lg-7">
-              <div className="card border-0 shadow-sm" style={{ borderRadius: 16 }}>
-                <div className="card-body p-4">
-                  <div className="section-title mb-4">Order Summary</div>
-
-                  {order.items.map(item => (
-                    <div key={item.id || item.menu_item_id} className="d-flex justify-content-between py-2 border-bottom">
-                      <div>
-                        <span style={{ fontSize: 14, fontWeight: 500 }}>{item.image_url || "🍽️"} {item.name}</span>
-                        <span className="text-muted ms-2" style={{ fontSize: 12 }}>×{item.qty || item.quantity}</span>
-                      </div>
-                      <span style={{ fontSize: 14, fontWeight: 600 }}>{Number(item.subtotal || item.price * item.qty).toFixed(0)} EGP</span>
+                {/* Items recap */}
+                <div className="op-order-items op-order-items--recap">
+                  {order.items.map((item, idx) => (
+                    <div key={item.id || item.menu_item_id || idx} className="op-order-item">
+                      <span>{item.image_url || "🍽️"} {item.name} <span className="op-item-qty">×{item.qty || item.quantity}</span></span>
+                      <span className="op-order-item-price">{Number(item.subtotal || item.price * item.qty).toFixed(0)} EGP</span>
                     </div>
                   ))}
-
-                  <div className="p-3 rounded-3 my-4" style={{ background: "#f8fafc" }}>
-                    <div className="d-flex justify-content-between mb-1">
-                      <span className="text-muted" style={{ fontSize: 13 }}>Subtotal</span>
-                      <span>{Number(order.subtotal).toFixed(2)} EGP</span>
-                    </div>
-                    {order.discount > 0 && (
-                      <div className="d-flex justify-content-between mb-1">
-                        <span style={{ fontSize: 13, color: "var(--success)" }}>Voucher ({order.voucher_code})</span>
-                        <span style={{ color: "var(--success)" }}>−{Number(order.discount).toFixed(2)} EGP</span>
-                      </div>
-                    )}
-                    <div className="d-flex justify-content-between fw-bold border-top pt-2 mt-1" style={{ fontSize: 17 }}>
-                      <span>Total</span>
-                      <span style={{ color: "var(--brand)" }}>{Number(order.total).toFixed(2)} EGP</span>
-                    </div>
+                  <div className="op-order-item op-order-item--total">
+                    <span>Total Paid</span>
+                    <span>{Number(order.total).toFixed(2)} EGP</span>
                   </div>
+                </div>
 
-                  {/* Payment method — FR10 */}
-                  <div className="section-title mb-3" style={{ fontSize: 17 }}>Select Payment Method</div>
-                  <div className="row g-2 mb-4">
-                    {[
-                      { id: "online",    label: "💳 Online Payment",  desc: "Credit/Debit card via secure gateway" },
-                      { id: "cash",      label: "💵 Cash on Delivery", desc: "Pay when you collect your order" },
-                      { id: "wallet",    label: "👛 Wallet",           desc: "Deduct from your digital wallet" },
-                      { id: "meal_plan", label: "🎓 Meal Plan",        desc: "Use your university meal credits" },
-                    ].map(m => (
-                      <div key={m.id} className="col-sm-6">
-                        <div className={`pay-method ${payMethod === m.id ? "selected" : ""}`} onClick={() => setPayMethod(m.id)}>
-                          <div className="fw-bold" style={{ fontSize: 14 }}>{m.label}</div>
-                          <div className="text-muted" style={{ fontSize: 11, marginTop: 2 }}>{m.desc}</div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="d-flex gap-3">
-                    <button className="btn btn-outline-secondary flex-fill" onClick={() => setStep("cart")}>← Back</button>
-                    <button
-                      className="btn btn-primary flex-fill py-2 fw-bold"
-                      onClick={startPayment}
-                      disabled={loading}
-                      style={{ borderRadius: 10 }}
-                    >
-                      {loading && <span className="spinner-border spinner-border-sm me-2" />}
-                      Proceed to Payment →
+                <div className="op-card-actions">
+                  <button className="op-ghost-btn" onClick={goBackToMenu}>New Order</button>
+                  {["confirmed","preparing"].includes(order.status) && (
+                    <button className="op-action-btn op-action-btn--danger" onClick={() => setCancelModal(true)}>
+                      <i className="bi bi-x-circle me-1" />Cancel Order
                     </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ══════════════ PAYMENT ══════════════ */}
-        {step === "payment" && order && (
-          <div className="row justify-content-center">
-            <div className="col-lg-6">
-              <div className="card border-0 shadow-sm" style={{ borderRadius: 16 }}>
-                <div className="card-body p-4 text-center">
-
-                  {/* Online — processing */}
-                  {payState === "processing" && payMethod === "online" && (
-                    <>
-                      <div style={{ fontSize: 56, marginBottom: 12 }}>🔐</div>
-                      <div className="section-title mb-2">Secure Payment</div>
-                      <div className="text-muted mb-3" style={{ fontSize: 13 }}>
-                        Complete your payment of <strong>{Number(order.total).toFixed(2)} EGP</strong>
-                      </div>
-
-                      {/* FR24 — countdown */}
-                      <div className="p-3 rounded-3 mb-4" style={{ background: "#fef3c7", border: "1.5px solid #fde68a" }}>
-                        <div className="timer-ring" style={{ fontSize: 32, fontWeight: 700, color: "#d97706" }}>
-                          {fmtTime(timeLeft || 0)}
-                        </div>
-                        <div style={{ fontSize: 12, color: "#92400e", marginTop: 4 }}>
-                          Session expires in {fmtTime(timeLeft || 0)}
-                        </div>
-                      </div>
-
-                      {/* Card form */}
-                      <div className="text-start mb-4">
-                        <label className="form-label fw-bold" style={{ fontSize: 13 }}>Card Number</label>
-                        <input className="form-control mb-2" placeholder="4111 1111 1111 1111" style={{ fontFamily: "monospace" }} />
-                        <div className="row g-2">
-                          <div className="col-6">
-                            <label className="form-label fw-bold" style={{ fontSize: 13 }}>Expiry</label>
-                            <input className="form-control" placeholder="MM/YY" />
-                          </div>
-                          <div className="col-6">
-                            <label className="form-label fw-bold" style={{ fontSize: 13 }}>CVV</label>
-                            <input className="form-control" placeholder="•••" />
-                          </div>
-                        </div>
-                      </div>
-
-                      <button
-                        className="btn btn-success w-100 py-2 fw-bold mb-3"
-                        onClick={confirmOrder}
-                        disabled={loading}
-                        style={{ borderRadius: 10 }}
-                      >
-                        {loading && <span className="spinner-border spinner-border-sm me-2" />}
-                        Pay {Number(order.total).toFixed(2)} EGP
-                      </button>
-
-                      <div className="text-muted mb-2" style={{ fontSize: 12 }}>— Simulate gateway response —</div>
-                      <div className="d-flex gap-2 justify-content-center">
-                        <button className="btn btn-sm btn-outline-danger" onClick={() => simulateFailure("insufficient_funds")}>Fail: NSF</button>
-                        <button className="btn btn-sm btn-outline-danger" onClick={() => simulateFailure("card_expired")}>Fail: Expired</button>
-                        <button className="btn btn-sm btn-outline-danger" onClick={() => simulateFailure("gateway_error")}>Fail: Gateway</button>
-                      </div>
-                    </>
-                  )}
-
-                  {/* Non-online processing */}
-                  {payState === "processing" && payMethod !== "online" && (
-                    <>
-                      <div className="spinner-border text-primary mb-3" style={{ width: 48, height: 48 }} />
-                      <div className="fw-bold">Processing {payMethod.replace("_", " ")} payment…</div>
-                    </>
-                  )}
-
-                  {/* FR13 — Success */}
-                  {payState === "success" && (
-                    <>
-                      <div style={{ fontSize: 64 }}>✅</div>
-                      <div className="section-title mt-2 mb-1" style={{ color: "var(--success)" }}>Payment Confirmed!</div>
-                      <div className="text-muted mb-1" style={{ fontSize: 14 }}>Order ID: <strong>{order.id}</strong></div>
-                      <div className="text-muted mb-4" style={{ fontSize: 13 }}>Your order is confirmed and being processed.</div>
-                      <button className="btn btn-primary w-100 py-2 fw-bold" onClick={() => setStep("tracking")} style={{ borderRadius: 10 }}>
-                        Track My Order →
-                      </button>
-                    </>
-                  )}
-
-                  {/* FR12 — Failed */}
-                  {payState === "failed" && (
-                    <>
-                      <div style={{ fontSize: 64 }}>❌</div>
-                      <div className="section-title mt-2 mb-1" style={{ color: "var(--danger)" }}>Payment Failed</div>
-                      <div className="p-3 rounded-3 mb-4" style={{ background: "#fef2f2", border: "1.5px solid #fecaca" }}>
-                        <div style={{ fontSize: 14, color: "var(--danger)", fontWeight: 500 }}>{payError}</div>
-                      </div>
-                      <div className="d-flex gap-3">
-                        <button className="btn btn-outline-secondary flex-fill" onClick={() => setStep("checkout")}>Change Method</button>
-                        <button
-                          className="btn btn-primary flex-fill py-2 fw-bold"
-                          onClick={retryPayment}
-                          disabled={loading}
-                          style={{ borderRadius: 10 }}
-                        >
-                          {loading && <span className="spinner-border spinner-border-sm me-2" />}
-                          Retry Payment
-                        </button>
-                      </div>
-                    </>
-                  )}
-
-                  {/* FR24 — Timeout */}
-                  {payState === "timeout" && (
-                    <>
-                      <div style={{ fontSize: 64 }}>⏰</div>
-                      <div className="section-title mt-2 mb-1" style={{ color: "var(--warning)" }}>Session Expired</div>
-                      <div className="text-muted mb-4" style={{ fontSize: 14 }}>
-                        Payment session timed out. Your cart has been preserved.
-                      </div>
-                      <button
-                        className="btn btn-warning w-100 py-2 fw-bold"
-                        onClick={retryPayment}
-                        disabled={loading}
-                        style={{ borderRadius: 10 }}
-                      >
-                        Restart Payment
-                      </button>
-                    </>
                   )}
                 </div>
               </div>
             </div>
-          </div>
+          )}
+
+        </div>{/* op-body */}
+
+        {/* ── Modals ── */}
+        {cancelModal && (
+          <Modal title="Cancel Order?" danger loading={loading}
+            confirmLabel="Yes, Cancel" onClose={() => setCancelModal(false)} onConfirm={handleCancel}>
+            <p className="op-modal-text">
+              Are you sure you want to cancel order <strong>{order?.id}</strong>?
+              {["online","wallet","meal_plan"].includes(order?.payment_method) &&
+                " A full refund will be processed within 3–5 business days."}
+            </p>
+          </Modal>
         )}
 
-        {/* ══════════════ TRACKING ══════════════ */}
-        {step === "tracking" && order && (
-          <div className="row justify-content-center">
-            <div className="col-lg-8">
-              <div className="card border-0 shadow-sm" style={{ borderRadius: 16 }}>
-                <div className="card-body p-4">
-
-                  <div className="d-flex justify-content-between align-items-start mb-4">
-                    <div>
-                      <div className="section-title">📦 Order Tracking</div>
-                      <div className="text-muted" style={{ fontSize: 13 }}>Order #{order.id}</div>
-                    </div>
-                    <span className={`badge-status bg-${STATUS_COLORS[order.status] || "secondary"} text-white`}>
-                      {STATUS_LABELS[order.status] || order.status}
-                    </span>
-                  </div>
-
-                  {/* Progress timeline */}
-                  {!["cancelled", "payment_timeout"].includes(order.status) && (
-                    <div className="mb-4">
-                      {["confirmed", "preparing", "ready_for_pickup", "delivered"].map((s, i) => {
-                        const ord  = ["confirmed", "preparing", "ready_for_pickup", "delivered"];
-                        const done = i <= ord.indexOf(order.status);
-                        return (
-                          <div key={s} className="d-flex align-items-center gap-3 mb-3">
-                            <div style={{
-                              width: 40, height: 40, borderRadius: "50%",
-                              background: done ? "var(--brand)" : "#e2e8f0",
-                              color:      done ? "#fff" : "#94a3b8",
-                              display: "flex", alignItems: "center", justifyContent: "center",
-                              fontSize: 16, flexShrink: 0,
-                            }}>
-                              {["✅", "👨‍🍳", "🏪", "🎉"][i]}
-                            </div>
-                            <div>
-                              <div className="fw-bold" style={{ fontSize: 14, color: done ? "#1e293b" : "#94a3b8" }}>
-                                {STATUS_LABELS[s]}
-                              </div>
-                              {done && <div className="text-muted" style={{ fontSize: 12 }}>Completed</div>}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* Cancelled banner */}
-                  {order.status === "cancelled" && (
-                    <div className="p-3 rounded-3 mb-4 text-center" style={{ background: "#fef2f2", border: "1.5px solid #fecaca" }}>
-                      <div style={{ fontSize: 32 }}>🚫</div>
-                      <div className="fw-bold mt-1" style={{ color: "var(--danger)" }}>Order Cancelled</div>
-                      {["online", "wallet", "meal_plan"].includes(order.payment_method) && (
-                        <div className="text-muted" style={{ fontSize: 12, marginTop: 4 }}>
-                          Refund will be processed within 3-5 business days
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* FR16 — Staff status panel (shown to staff/admin roles too) */}
-                  {!["cancelled", "delivered", "payment_timeout"].includes(order.status) && (
-                    <div className="p-3 rounded-3 mb-4" style={{ background: "#f0f9ff", border: "1.5px solid #bae6fd" }}>
-                      <div className="fw-bold mb-2" style={{ fontSize: 13, color: "#0369a1" }}>
-                        👨‍💼 Staff Panel — Update Order Status
-                      </div>
-                      <div className="d-flex gap-2 flex-wrap">
-                        {["preparing", "ready_for_pickup", "delivered"].map(s => (
-                          <button
-                            key={s}
-                            className="btn btn-sm btn-outline-primary"
-                            style={{ fontSize: 11 }}
-                            onClick={() => simulateStatusUpdate(s)}
-                          >
-                            → {STATUS_LABELS[s]}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Order items recap */}
-                  <div className="border-top pt-3">
-                    <div className="fw-bold mb-2" style={{ fontSize: 14 }}>Items Ordered</div>
-                    {order.items.map(item => (
-                      <div key={item.id || item.menu_item_id} className="d-flex justify-content-between py-1">
-                        <span style={{ fontSize: 13 }}>{item.image_url || "🍽️"} {item.name} ×{item.qty || item.quantity}</span>
-                        <span style={{ fontSize: 13, fontWeight: 600 }}>{Number(item.subtotal || item.price * item.qty).toFixed(0)} EGP</span>
-                      </div>
-                    ))}
-                    <div className="d-flex justify-content-between border-top mt-2 pt-2 fw-bold">
-                      <span>Total Paid</span>
-                      <span style={{ color: "var(--brand)" }}>{Number(order.total).toFixed(2)} EGP</span>
-                    </div>
-                  </div>
-
-                  {/* Actions */}
-                  <div className="d-flex gap-3 mt-4">
-                    <button
-                      className="btn btn-outline-secondary"
-                      onClick={() => { setStep("cart"); setCart([]); setOrder(null); setPayState("idle"); }}
-                    >
-                      New Order
-                    </button>
-                    {["confirmed", "preparing"].includes(order.status) && (
-                      <button className="btn btn-outline-danger" onClick={() => setCancelModal(true)}>
-                        Cancel Order
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-      </div>
-
-      {/* ── Cancel Modal (FR14) ── */}
-      {cancelModal && (
-        <div className="modal d-block" style={{ background: "rgba(0,0,0,.5)" }}>
-          <div className="modal-dialog modal-dialog-centered">
-            <div className="modal-content border-0" style={{ borderRadius: 14 }}>
-              <div className="modal-header border-0 pb-0">
-                <h5 className="modal-title">Cancel Order?</h5>
-                <button className="btn-close" onClick={() => setCancelModal(false)} />
-              </div>
-              <div className="modal-body">
-                <p className="text-muted" style={{ fontSize: 14 }}>
-                  Are you sure you want to cancel order <strong>{order?.id}</strong>?
-                  {["online", "wallet", "meal_plan"].includes(order?.payment_method) &&
-                    " A full refund will be processed within 3-5 business days."}
+        {partialModal && (
+          <Modal title="Cancellation Window Passed" loading={loading}
+            confirmLabel="Accept Partial Refund" onClose={() => setPartialModal(false)} onConfirm={confirmPartialRefund}>
+            <div className="op-warn-box">
+              <i className="bi bi-exclamation-triangle-fill" style={{color:"var(--uc-warn)",fontSize:20}} />
+              <div>
+                <p className="op-modal-text" style={{marginBottom:8}}>
+                  The cancellation window has passed. A <strong>50% partial refund</strong> of{" "}
+                  <strong>{((order?.total||0)*0.5).toFixed(2)} EGP</strong> may apply.
                 </p>
-              </div>
-              <div className="modal-footer border-0 pt-0">
-                <button className="btn btn-outline-secondary" onClick={() => setCancelModal(false)}>Keep Order</button>
-                <button className="btn btn-danger" onClick={handleCancel} disabled={loading}>
-                  {loading && <span className="spinner-border spinner-border-sm me-1" />} Yes, Cancel
-                </button>
+                <p className="op-muted" style={{fontSize:12}}>Do you want to proceed?</p>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+          </Modal>
+        )}
 
-      {/* ── Partial Refund Modal (FR26) ── */}
-      {partialModal && (
-        <div className="modal d-block" style={{ background: "rgba(0,0,0,.5)" }}>
-          <div className="modal-dialog modal-dialog-centered">
-            <div className="modal-content border-0" style={{ borderRadius: 14 }}>
-              <div className="modal-header border-0 pb-0">
-                <h5 className="modal-title">⚠️ Cancellation Window Passed</h5>
-                <button className="btn-close" onClick={() => setPartialModal(false)} />
-              </div>
-              <div className="modal-body">
-                <div className="p-3 rounded-3" style={{ background: "#fffbeb", border: "1.5px solid #fde68a" }}>
-                  <p style={{ fontSize: 14, marginBottom: 8 }}>
-                    The 15-minute cancellation window has passed.
-                    A <strong>50% partial refund</strong> of{" "}
-                    <strong>{((order?.total || 0) * 0.5).toFixed(2)} EGP</strong> may apply.
-                  </p>
-                  <p className="text-muted mb-0" style={{ fontSize: 13 }}>Do you want to proceed?</p>
-                </div>
-              </div>
-              <div className="modal-footer border-0 pt-0">
-                <button className="btn btn-outline-secondary" onClick={() => setPartialModal(false)}>Keep Order</button>
-                <button className="btn btn-warning" onClick={confirmPartialRefund} disabled={loading}>
-                  {loading && <span className="spinner-border spinner-border-sm me-1" />}
-                  Accept Partial Refund
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-    </div>
+        <ToastStack toasts={toasts} removeToast={removeToast} />
+      </div>
+    </>
   );
 }
+
+// ════════════════════════════════════════════════════════════
+// CSS — identical tokens to Login.jsx / MenuPage.jsx
+// ════════════════════════════════════════════════════════════
+const OP_CSS = `
+  *, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
+  :root {
+    --uc-bg:#080d14; --uc-card:#111825;
+    --uc-brd:rgba(255,255,255,0.07); --uc-brd-hi:rgba(99,179,237,0.4);
+    --uc-acc:#3b9eda; --uc-acc2:#22c993; --uc-gold:#f6c90e;
+    --uc-text:#e8edf5; --uc-muted:#6b7a90;
+    --uc-danger:#f56565; --uc-warn:#f6ad55;
+    --uc-inp:rgba(255,255,255,0.035);
+    --uc-r:14px; --uc-rs:9px;
+    --fd:'Sora',sans-serif; --fb:'DM Sans',sans-serif;
+  }
+  .op-page { min-height:100vh; background:var(--uc-bg); color:var(--uc-text); font-family:var(--fb); position:relative; overflow-x:hidden; }
+  .uc-mesh { position:fixed; inset:0; z-index:0; pointer-events:none; overflow:hidden; }
+  .uc-mesh::before { content:''; position:absolute; inset:-40%;
+    background:radial-gradient(ellipse 65% 55% at 15% 25%,rgba(59,158,218,.10) 0%,transparent 60%),
+               radial-gradient(ellipse 55% 45% at 85% 75%,rgba(34,201,147,.07) 0%,transparent 55%),
+               radial-gradient(ellipse 45% 55% at 55% 5%, rgba(246,201,14,.05) 0%,transparent 50%);
+    animation:meshMove 18s ease-in-out infinite alternate; }
+  @keyframes meshMove{from{transform:translate(0,0)}to{transform:translate(2%,1.5%) rotate(1.5deg)}}
+  .uc-grid { position:fixed; inset:0; z-index:0; pointer-events:none;
+    background-image:linear-gradient(rgba(255,255,255,.014) 1px,transparent 1px),
+                     linear-gradient(90deg,rgba(255,255,255,.014) 1px,transparent 1px);
+    background-size:52px 52px; }
+
+  /* Nav */
+  .mp-nav { position:sticky; top:0; z-index:200; display:flex; align-items:center; justify-content:space-between;
+    padding:0 clamp(16px,3vw,32px); height:60px;
+    background:rgba(8,13,20,.88); backdrop-filter:blur(16px); border-bottom:1px solid var(--uc-brd); }
+  .mp-nav-brand { display:flex; align-items:center; gap:10px; }
+  .mp-nav-logo { width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg,var(--uc-acc),var(--uc-acc2));
+    display:flex; align-items:center; justify-content:center; font-size:16px; }
+  .mp-nav-name { font-family:var(--fd); font-size:16px; font-weight:700; letter-spacing:-.02em; }
+  .mp-nav-actions { display:flex; align-items:center; gap:8px; }
+  .mp-logout-btn { width:36px; height:36px; display:flex; align-items:center; justify-content:center;
+    background:none; border:1px solid var(--uc-brd); border-radius:var(--uc-rs);
+    color:var(--uc-muted); cursor:pointer; font-size:15px; transition:all .2s; }
+  .mp-logout-btn:hover { border-color:var(--uc-danger); color:var(--uc-danger); }
+
+  /* Back button */
+  .op-back-btn { display:flex; align-items:center; gap:6px; background:var(--uc-inp); border:1px solid var(--uc-brd);
+    border-radius:var(--uc-rs); color:var(--uc-muted); font-family:var(--fb); font-size:13px; font-weight:600;
+    padding:7px 14px; cursor:pointer; transition:all .2s; }
+  .op-back-btn:hover { border-color:var(--uc-acc); color:var(--uc-text); }
+
+  /* Step bar */
+  .op-stepbar-wrap { position:relative; z-index:1; background:rgba(17,24,37,.8); backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--uc-brd); padding:14px clamp(16px,5vw,48px); }
+  .op-stepbar { display:flex; align-items:center; max-width:400px; margin:0 auto; }
+  .op-step { display:flex; flex-direction:column; align-items:center; gap:5px; }
+  .op-step-dot { width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    font-size:13px; font-weight:600; background:var(--uc-inp); border:1px solid var(--uc-brd); color:var(--uc-muted); transition:all .3s; }
+  .op-step-dot--done   { background:var(--uc-acc2); border-color:var(--uc-acc2); color:#fff; }
+  .op-step-dot--active { background:var(--uc-acc);  border-color:var(--uc-acc);  color:#fff; }
+  .op-step-label { font-size:10.5px; color:var(--uc-muted); font-weight:500; white-space:nowrap; }
+  .op-step-label--active { color:var(--uc-acc); font-weight:700; }
+  .op-step-line { flex:1; height:2px; background:var(--uc-brd); transition:background .3s; margin:0 6px; margin-bottom:16px; }
+  .op-step-line--done { background:var(--uc-acc2); }
+
+  /* Body */
+  .op-body { position:relative; z-index:1; padding:clamp(16px,3vw,28px); min-height:calc(100vh - 120px); }
+
+  /* Centered layout */
+  .op-centered { display:flex; justify-content:center; }
+  .op-card { background:var(--uc-card); border:1px solid var(--uc-brd); border-radius:var(--uc-r);
+    padding:clamp(22px,4vw,36px); width:100%; max-width:640px;
+    box-shadow:0 24px 48px rgba(0,0,0,.45); }
+  .op-card--narrow { max-width:480px; }
+  .op-card-title { font-family:var(--fd); font-size:clamp(18px,2.5vw,22px); font-weight:700;
+    letter-spacing:-.02em; margin-bottom:16px; }
+
+  /* Order items */
+  .op-order-items { display:flex; flex-direction:column; gap:0; margin-bottom:16px; }
+  .op-order-item { display:flex; justify-content:space-between; align-items:center;
+    padding:10px 0; border-bottom:1px solid var(--uc-brd); font-size:13.5px; }
+  .op-order-items--recap .op-order-item { padding:8px 0; font-size:13px; }
+  .op-order-item--total { font-family:var(--fd); font-size:16px; font-weight:700; border-bottom:none; padding-top:12px; }
+  .op-order-item-price { font-weight:700; color:var(--uc-acc); white-space:nowrap; margin-left:12px; }
+  .op-item-qty { color:var(--uc-muted); font-size:12px; margin-left:4px; }
+
+  /* Totals */
+  .op-totals { border-top:1px solid var(--uc-brd); padding-top:12px; margin-bottom:16px; display:flex; flex-direction:column; gap:7px; }
+  .op-totals-row { display:flex; justify-content:space-between; font-size:13px; color:var(--uc-muted); }
+  .op-totals-row--disc { color:var(--uc-acc2); }
+  .op-totals-total { font-family:var(--fd); font-size:16px; font-weight:700; color:var(--uc-text);
+    padding-top:7px; border-top:1px solid var(--uc-brd); }
+
+  /* Payment methods */
+  .op-section-label { font-family:var(--fd); font-size:15px; font-weight:700; margin:20px 0 12px; }
+  .op-pay-methods { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:22px; }
+  .op-pay-method { display:flex; align-items:center; gap:10px; background:var(--uc-inp);
+    border:1px solid var(--uc-brd); border-radius:var(--uc-r); padding:12px 14px;
+    cursor:pointer; transition:all .2s; text-align:left; position:relative; }
+  .op-pay-method:hover { border-color:var(--uc-acc); }
+  .op-pay-method--active { background:rgba(59,158,218,.08); border-color:var(--uc-acc); }
+  .op-pay-icon { font-size:20px; color:var(--uc-acc); flex-shrink:0; }
+  .op-pay-label { font-size:13px; font-weight:600; }
+  .op-pay-desc  { font-size:11px; color:var(--uc-muted); margin-top:1px; }
+  .op-pay-check { position:absolute; top:10px; right:10px; color:var(--uc-acc); font-size:14px; }
+
+  /* Payment screen */
+  .op-pay-hero { display:flex; flex-direction:column; align-items:center; text-align:center; gap:8px; }
+  .op-pay-icon-wrap { width:64px; height:64px; border-radius:50%;
+    background:rgba(59,158,218,.12); border:2px solid rgba(59,158,218,.3);
+    display:flex; align-items:center; justify-content:center; font-size:26px; color:var(--uc-acc); margin-bottom:8px; }
+  .op-pay-icon-wrap--success { background:rgba(34,201,147,.12); border-color:rgba(34,201,147,.3); color:var(--uc-acc2); }
+  .op-pay-icon-wrap--danger  { background:rgba(245,101,101,.12); border-color:rgba(245,101,101,.3); color:var(--uc-danger); }
+  .op-pay-icon-wrap--warn    { background:rgba(246,173,85,.12);  border-color:rgba(246,173,85,.3);  color:var(--uc-warn); }
+  .op-pay-amount { font-family:var(--fd); font-size:26px; font-weight:700; color:var(--uc-acc); margin-bottom:4px; }
+  .op-muted { font-size:13px; color:var(--uc-muted); line-height:1.5; }
+
+  /* Countdown */
+  .op-countdown { display:flex; align-items:center; gap:8px; justify-content:center;
+    background:rgba(246,173,85,.08); border:1px solid rgba(246,173,85,.25); border-radius:var(--uc-rs);
+    padding:10px 16px; font-size:13px; color:var(--uc-warn); margin:12px 0; }
+  .op-countdown-timer { font-family:monospace; font-size:18px; font-weight:700; color:var(--uc-gold); }
+
+  /* Card form */
+  .op-card-form { width:100%; display:flex; flex-direction:column; gap:12px; margin:12px 0; }
+  .op-field { display:flex; flex-direction:column; gap:5px; }
+  .op-field-row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .op-field-label { font-size:11px; font-weight:600; letter-spacing:.07em; text-transform:uppercase; color:var(--uc-muted); }
+  .op-input { background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:var(--uc-rs);
+    color:var(--uc-text); font-family:var(--fb); font-size:13.5px; padding:10px 12px;
+    outline:none; transition:border-color .2s,box-shadow .2s; width:100%; }
+  .op-input:focus { border-color:var(--uc-acc); box-shadow:0 0 0 3px rgba(59,158,218,.12); }
+  .op-input::placeholder { color:rgba(107,122,144,.5); }
+
+  /* Retry / sim */
+  .op-retry-hint { font-size:11px; color:var(--uc-muted); text-align:center; margin-top:6px; }
+  .op-sim-row { display:flex; align-items:center; gap:6px; margin-top:14px; flex-wrap:wrap; justify-content:center; }
+  .op-sim-label { font-size:11px; color:var(--uc-muted); }
+  .op-sim-btn { background:rgba(245,101,101,.08); border:1px solid rgba(245,101,101,.25);
+    border-radius:var(--uc-rs); color:var(--uc-danger); font-family:var(--fb);
+    font-size:11px; font-weight:600; padding:5px 10px; cursor:pointer; transition:all .2s; }
+  .op-sim-btn:hover { background:rgba(245,101,101,.16); }
+
+  /* Error box */
+  .op-err-box { background:rgba(245,101,101,.07); border:1px solid rgba(245,101,101,.22);
+    border-radius:var(--uc-rs); padding:12px 14px; width:100%; }
+  .op-err-msg { font-size:13.5px; color:var(--uc-danger); }
+  .op-balance-breakdown { margin-top:10px; display:flex; flex-direction:column; gap:5px; font-size:12.5px; }
+  .op-balance-breakdown div { display:flex; justify-content:space-between; color:var(--uc-muted); }
+  .op-shortfall { border-top:1px solid var(--uc-brd); padding-top:5px; margin-top:2px; }
+
+  /* Tracking */
+  .op-tracking-hd { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:20px; }
+  .op-status-chip { font-size:11px; font-weight:700; padding:4px 12px; border-radius:100px; border:1px solid; white-space:nowrap; }
+  .op-timeline { display:grid; grid-template-columns:auto 1fr; gap:12px 14px; align-items:start; margin-bottom:18px; }
+  .op-tl-node { width:38px; height:38px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    font-size:16px; background:var(--uc-inp); border:1px solid var(--uc-brd); color:var(--uc-muted); flex-shrink:0; transition:all .3s; }
+  .op-tl-node--done { background:rgba(59,158,218,.12); border-color:var(--uc-acc); color:var(--uc-acc); }
+  .op-tl-label { font-size:13.5px; font-weight:500; color:var(--uc-muted); }
+  .op-tl-label--done { color:var(--uc-text); font-weight:600; }
+  .op-tl-sub { font-size:11px; color:var(--uc-muted); }
+  .op-tl-line { height:1px; background:var(--uc-brd); align-self:center; }
+  .op-tl-line--done { background:var(--uc-acc); }
+  .op-cancelled-box { text-align:center; padding:20px; background:rgba(245,101,101,.06);
+    border:1px solid rgba(245,101,101,.2); border-radius:var(--uc-rs); margin-bottom:16px; }
+  .op-cancelled-title { font-family:var(--fd); font-size:16px; font-weight:700; color:var(--uc-danger); margin:8px 0 6px; }
+  .op-staff-panel { background:rgba(59,158,218,.05); border:1px solid rgba(59,158,218,.2);
+    border-radius:var(--uc-rs); padding:14px; margin-bottom:16px; }
+  .op-staff-panel-title { font-size:12px; font-weight:700; color:var(--uc-acc); margin-bottom:10px;
+    letter-spacing:.04em; text-transform:uppercase; }
+  .op-staff-actions { display:flex; gap:8px; flex-wrap:wrap; }
+  .op-staff-btn { background:rgba(59,158,218,.08); border:1px solid rgba(59,158,218,.25);
+    border-radius:var(--uc-rs); color:var(--uc-acc); font-family:var(--fb);
+    font-size:12px; font-weight:600; padding:7px 12px; cursor:pointer; transition:all .2s; }
+  .op-staff-btn:hover { background:rgba(59,158,218,.18); }
+
+  /* Buttons */
+  .op-card-actions { display:flex; gap:10px; margin-top:20px; justify-content:flex-end; }
+  .op-primary-btn { display:flex; align-items:center; justify-content:center; gap:7px;
+    background:linear-gradient(135deg,var(--uc-acc),#2878be); border:none; border-radius:var(--uc-rs);
+    color:#fff; font-family:var(--fb); font-size:14px; font-weight:700;
+    padding:12px 22px; cursor:pointer; box-shadow:0 4px 16px rgba(59,158,218,.28); transition:transform .15s,opacity .2s; }
+  .op-primary-btn:hover:not(:disabled) { transform:translateY(-1px); }
+  .op-primary-btn:disabled { opacity:.45; cursor:not-allowed; transform:none; }
+  .op-primary-btn--green { background:linear-gradient(135deg,var(--uc-acc2),#16a87a); box-shadow:0 4px 16px rgba(34,201,147,.28); }
+  .op-ghost-btn { display:inline-flex; align-items:center; gap:5px; background:var(--uc-inp);
+    border:1px solid var(--uc-brd); border-radius:var(--uc-rs); color:var(--uc-muted);
+    font-family:var(--fb); font-size:13.5px; padding:10px 18px; cursor:pointer; transition:all .2s; }
+  .op-ghost-btn:hover { border-color:var(--uc-acc); color:var(--uc-text); }
+  .op-action-btn { display:inline-flex; align-items:center; gap:6px; border:none; border-radius:var(--uc-rs);
+    font-family:var(--fb); font-size:13px; font-weight:600; padding:10px 16px; cursor:pointer; transition:all .2s; }
+  .op-action-btn--danger { background:rgba(245,101,101,.1); color:var(--uc-danger); border:1px solid rgba(245,101,101,.3); }
+  .op-action-btn--warn   { background:rgba(246,173,85,.1);  color:var(--uc-warn);   border:1px solid rgba(246,173,85,.3); }
+  .op-action-btn:hover { opacity:.85; }
+  .op-icon-btn { width:30px; height:30px; display:flex; align-items:center; justify-content:center;
+    background:none; border:1px solid var(--uc-brd); border-radius:var(--uc-rs);
+    color:var(--uc-muted); cursor:pointer; font-size:13px; transition:all .2s; }
+  .op-icon-btn:hover { border-color:var(--uc-danger); color:var(--uc-danger); }
+
+  /* Modal */
+  .op-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.6); backdrop-filter:blur(4px); z-index:500; }
+  .op-modal-wrap { position:fixed; inset:0; z-index:501; display:flex; align-items:center; justify-content:center; padding:20px; }
+  .op-modal { background:var(--uc-card); border:1px solid var(--uc-brd-hi); border-radius:var(--uc-r);
+    padding:24px; width:100%; max-width:420px; box-shadow:0 24px 48px rgba(0,0,0,.6);
+    animation:fadeUp .25s ease both; }
+  @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+  .op-modal-hd { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; }
+  .op-modal-title { font-family:var(--fd); font-size:16px; font-weight:700; }
+  .op-modal-body { margin-bottom:16px; }
+  .op-modal-ft { display:flex; justify-content:flex-end; gap:10px; }
+  .op-modal-text { font-size:13.5px; color:var(--uc-muted); line-height:1.6; }
+  .op-warn-box { display:flex; gap:12px; align-items:flex-start; background:rgba(246,173,85,.07);
+    border:1px solid rgba(246,173,85,.25); border-radius:var(--uc-rs); padding:14px; }
+
+  /* Loading / empty */
+  .op-loading { display:flex; flex-direction:column; align-items:center; gap:14px; padding:80px 20px; color:var(--uc-muted); }
+  .op-spinner { width:32px; height:32px; border:3px solid var(--uc-brd); border-top-color:var(--uc-acc);
+    border-radius:50%; animation:spin .7s linear infinite; }
+  .op-spinner--lg { width:48px; height:48px; border-width:4px; }
+  .op-spinner-sm { display:inline-block; width:14px; height:14px; border:2px solid rgba(255,255,255,.3);
+    border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; }
+  @keyframes spin { to{transform:rotate(360deg)} }
+
+  /* Toast */
+  .op-toast { display:flex; align-items:center; gap:10px; padding:11px 16px; border-radius:var(--uc-rs);
+    font-size:13px; font-weight:500; min-width:260px; max-width:380px;
+    box-shadow:0 8px 24px rgba(0,0,0,.4); animation:fadeUp .3s ease both; }
+  .op-toast--success { background:#0e2e20; border:1px solid rgba(34,201,147,.3); color:var(--uc-acc2); }
+  .op-toast--warn    { background:#2b1f0a; border:1px solid rgba(246,173,85,.3);  color:var(--uc-warn); }
+  .op-toast--error   { background:#2b0e0e; border:1px solid rgba(245,101,101,.3); color:var(--uc-danger); }
+  .op-toast-close    { margin-left:auto; background:none; border:none; cursor:pointer; color:inherit; opacity:.7; font-size:16px; padding:0; }
+
+  @media(max-width:640px) {
+    .op-pay-methods { grid-template-columns:1fr; }
+    .op-card-actions { flex-direction:column; }
+    .op-card-actions button { width:100%; justify-content:center; }
+  }
+`;

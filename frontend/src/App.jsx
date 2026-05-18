@@ -1,78 +1,106 @@
-import { BrowserRouter, Routes, Route, NavLink, Outlet, useNavigate } from "react-router-dom";
-import Login from "./features/auth/auth_components";
-import MenuPage from "./features/menu-cart/MenuPage";
-import AdminPanel from "./features/menu-cart/AdminPanel";
+// ============================================================
+// frontend/src/App.jsx
+// Root router — wires all four feature areas:
+//   /            → Login
+//   /menu        → MenuPage        (student / admin)
+//   /admin       → AdminPanel      (admin only)
+//   /order       → OrderPaymentApp (student / admin)
+//   /stock       → StockDashboard  (admin only)
+// ============================================================
 
-function CafeteriaLayout() {
-  return (
-    <div>
-      <nav className="navbar navbar-dark bg-dark px-4">
-        <span className="navbar-brand">🍴 Cafeteria System</span>
-        <div>
-          <NavLink 
-            to="/menu" 
-            className={({ isActive }) => `btn me-2 ${isActive ? 'btn-light' : 'btn-outline-light'}`}
-          >
-            Menu
-          </NavLink>
-          <NavLink 
-            to="/admin" 
-            className={({ isActive }) => `btn ${isActive ? 'btn-light' : 'btn-outline-light'}`}
-          >
-            Admin
-          </NavLink>
-        </div>
-      </nav>
-      <div className="p-4">
-        <Outlet />
-      </div>
-    </div>
-  );
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";
+
+import { Login }          from "./features/auth/auth_components";
+import MenuPage           from "./features/menu-cart/MenuPage";
+import AdminPanel         from "./features/menu-cart/AdminPanel";
+import OrderPaymentApp    from "./features/order/OrderPaymentApp";
+import StockDashboard     from "./features/stock/StockDashboard";
+
+// ── Helpers ───────────────────────────────────────────────────
+
+/** Returns the parsed user object stored at login, or null. */
+function getUser() {
+  try { return JSON.parse(localStorage.getItem("user") || "null"); }
+  catch { return null; }
 }
 
-// Separate wrapper so we can call useNavigate (hooks need to be inside BrowserRouter)
+// ── Guards ────────────────────────────────────────────────────
+
+/**
+ * Redirects unauthenticated visitors to "/" and visitors whose
+ * role isn't in `allowed` to "/menu".
+ */
+function RequireRole({ allowed, children }) {
+  const user = getUser();
+  if (!user) return <Navigate to="/" replace />;
+  if (allowed && !allowed.includes(user.role)) return <Navigate to="/menu" replace />;
+  return children;
+}
+
+// ── Login wrapper (needs useNavigate inside BrowserRouter) ────
 function LoginPage() {
   const navigate = useNavigate();
   return (
     <Login
       navigate={navigate}
       onLoginSuccess={(data) => {
-        // Optional: store user info if needed elsewhere
         localStorage.setItem("user", JSON.stringify(data.user));
       }}
     />
   );
 }
 
-function ProtectedRoute({ children }) {
-  const token = localStorage.getItem("jwt_token");
-  if (!token) { window.location.href = "/"; return null; }
-  return children;
-}
-
-// ── Role guard ────────────────────────────────────────────────
-// Redirects to "/" if not logged in, or to "/menu" if wrong role
-function RequireRole({ allowed, children }) {
-  const user = JSON.parse(localStorage.getItem("user") || "null");
-  if (!user) return <Navigate to="/" replace />;
-  if (!allowed.includes(user.role)) return <Navigate to="/menu" replace />;
-  return children;
-}
-
 // ── App ───────────────────────────────────────────────────────
-function App() {
+export default function App() {
   return (
     <BrowserRouter>
       <Routes>
+
+        {/* ── Public ── */}
         <Route path="/" element={<LoginPage />} />
 
-        <Route element={<CafeteriaLayout />}>
-          <Route path="/menu" element={<MenuPage />} />
-          <Route path="/admin" element={<AdminPanel />} />
-        </Route>
+        {/* ── Student + Admin ── */}
+        <Route
+          path="/menu"
+          element={
+            <RequireRole allowed={["student", "admin", "staff"]}>
+              <MenuPage />
+            </RequireRole>
+          }
+        />
+
+        <Route
+          path="/order"
+          element={
+            <RequireRole allowed={["student", "admin", "staff"]}>
+              <OrderPaymentApp />
+            </RequireRole>
+          }
+        />
+
+        {/* ── Admin only ── */}
+        <Route
+          path="/admin"
+          element={
+            <RequireRole allowed={["admin"]}>
+              <AdminPanel />
+            </RequireRole>
+          }
+        />
+
+        <Route
+          path="/stock"
+          element={
+            <RequireRole allowed={["admin", "staff"]}>
+              <StockDashboard />
+            </RequireRole>
+          }
+        />
+
+        {/* ── Fallback ── */}
+        <Route path="*" element={<Navigate to="/" replace />} />
+
       </Routes>
     </BrowserRouter>
   );
 }
-
-export default App;
