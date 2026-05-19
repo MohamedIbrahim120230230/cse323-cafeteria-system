@@ -15,7 +15,7 @@
 -- NFR11: Supports 500 concurrent lock acquisitions/sec via row-level locking.
 -- ============================================================
 
-CREATE TABLE stock_locks (
+CREATE TABLE IF NOT EXISTS stock_locks (
     id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     menu_item_id    INTEGER      NOT NULL REFERENCES menu_items(id) ON DELETE CASCADE,
     order_id        UUID         NOT NULL,            -- references orders(id) — cross-feature FK
@@ -27,12 +27,12 @@ CREATE TABLE stock_locks (
 );
 
 -- Index for fast per-item lock lookup (concurrent order check)
-CREATE INDEX idx_stock_locks_item_active
+CREATE INDEX IF NOT EXISTS idx_stock_locks_item_active
     ON stock_locks (menu_item_id, released_at)
     WHERE released_at IS NULL;
 
-CREATE INDEX idx_stock_locks_order_id  ON stock_locks (order_id);
-CREATE INDEX idx_stock_locks_expires_at ON stock_locks (expires_at)
+CREATE INDEX IF NOT EXISTS idx_stock_locks_order_id  ON stock_locks (order_id);
+CREATE INDEX IF NOT EXISTS idx_stock_locks_expires_at ON stock_locks (expires_at)
     WHERE released_at IS NULL;  -- TTL cleanup job only scans active locks
 
 -- ============================================================
@@ -42,16 +42,21 @@ CREATE INDEX idx_stock_locks_expires_at ON stock_locks (expires_at)
 -- NFR20: append-only financial-grade log.
 -- ============================================================
 
-CREATE TYPE stock_txn_type AS ENUM (
-    'RESERVE',          -- locked at order placement
-    'DEDUCT',           -- permanent decrement on payment success
-    'RELEASE',          -- lock released without deduction (payment failed / cancelled)
-    'RESTOCK',          -- admin manually adds stock
-    'CORRECTION',       -- admin adjusts to fix drift (FR41)
-    'ADMIN_DEDUCT'      -- admin removes stock manually
-);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'stock_txn_type') THEN
+        CREATE TYPE stock_txn_type AS ENUM (
+            'RESERVE',          -- locked at order placement
+            'DEDUCT',           -- permanent decrement on payment success
+            'RELEASE',          -- lock released without deduction (payment failed / cancelled)
+            'RESTOCK',          -- admin manually adds stock
+            'CORRECTION',       -- admin adjusts to fix drift (FR41)
+            'ADMIN_DEDUCT'      -- admin removes stock manually
+        );
+    END IF;
+END $$;
 
-CREATE TABLE stock_transactions (
+CREATE TABLE IF NOT EXISTS stock_transactions (
     id              BIGSERIAL    PRIMARY KEY,
     menu_item_id    INTEGER      NOT NULL REFERENCES menu_items(id) ON DELETE CASCADE,
     order_id        UUID         NULL,       -- NULL for manual admin operations
@@ -71,9 +76,9 @@ CREATE OR REPLACE RULE stock_txn_no_update AS
 CREATE OR REPLACE RULE stock_txn_no_delete AS
     ON DELETE TO stock_transactions DO INSTEAD NOTHING;
 
-CREATE INDEX idx_stock_txn_item_id   ON stock_transactions (menu_item_id, created_at DESC);
-CREATE INDEX idx_stock_txn_order_id  ON stock_transactions (order_id) WHERE order_id IS NOT NULL;
-CREATE INDEX idx_stock_txn_created   ON stock_transactions (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_stock_txn_item_id   ON stock_transactions (menu_item_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_stock_txn_order_id  ON stock_transactions (order_id) WHERE order_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_stock_txn_created   ON stock_transactions (created_at DESC);
 
 -- ============================================================
 -- TABLE: flagged_orders
@@ -82,9 +87,14 @@ CREATE INDEX idx_stock_txn_created   ON stock_transactions (created_at DESC);
 -- Auto-cancelled after 60 minutes without admin action (FR56).
 -- ============================================================
 
-CREATE TYPE flagged_order_status AS ENUM ('PENDING', 'APPROVED', 'REJECTED', 'AUTO_CANCELLED');
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'flagged_order_status') THEN
+        CREATE TYPE flagged_order_status AS ENUM ('PENDING', 'APPROVED', 'REJECTED', 'AUTO_CANCELLED');
+    END IF;
+END $$;
 
-CREATE TABLE flagged_orders (
+CREATE TABLE IF NOT EXISTS flagged_orders (
     id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     order_id        UUID         NOT NULL UNIQUE,
     flagged_reason  TEXT         NOT NULL,   -- human-readable reason
@@ -97,9 +107,9 @@ CREATE TABLE flagged_orders (
     auto_cancel_at  TIMESTAMPTZ  NOT NULL    -- flagged_at + 60 min
 );
 
-CREATE INDEX idx_flagged_orders_status    ON flagged_orders (status, flagged_at);
-CREATE INDEX idx_flagged_orders_order_id  ON flagged_orders (order_id);
-CREATE INDEX idx_flagged_orders_cancel_at ON flagged_orders (auto_cancel_at)
+CREATE INDEX IF NOT EXISTS idx_flagged_orders_status    ON flagged_orders (status, flagged_at);
+CREATE INDEX IF NOT EXISTS idx_flagged_orders_order_id  ON flagged_orders (order_id);
+CREATE INDEX IF NOT EXISTS idx_flagged_orders_cancel_at ON flagged_orders (auto_cancel_at)
     WHERE status = 'PENDING';
 
 -- ============================================================
@@ -108,7 +118,7 @@ CREATE INDEX idx_flagged_orders_cancel_at ON flagged_orders (auto_cancel_at)
 -- Admin can change thresholds without restart (within 60 sec).
 -- ============================================================
 
-CREATE TABLE system_config (
+CREATE TABLE IF NOT EXISTS system_config (
     key         VARCHAR(80)  PRIMARY KEY,
     value       TEXT         NOT NULL,
     description TEXT         NULL,
@@ -116,20 +126,24 @@ CREATE TABLE system_config (
     updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
--- Seed default config values
+-- Seed default config values safely
 INSERT INTO system_config (key, value, description) VALUES
     ('stock_lock_ttl_minutes',      '10',   'FR22: Pessimistic stock lock TTL in minutes'),
     ('max_concurrent_orders',       '150',  'FR25: Max simultaneous active orders before circuit-breaker triggers'),
     ('unrealistic_qty_threshold',   '10',   'FR24: Max quantity per item before order is flagged'),
     ('unrealistic_total_threshold', '500',  'FR24: Max order total (EGP) before order is flagged'),
     ('flagged_order_ttl_minutes',   '60',   'FR56: Minutes before unreviewed flagged order is auto-cancelled'),
-    ('payment_timeout_seconds',     '600',  'FR29: Payment pending TTL in seconds (10 min)');
+    ('payment_timeout_seconds',     '600',  'FR29: Payment pending TTL in seconds (10 min)')
+ON CONFLICT (key) DO NOTHING;
 
 -- ============================================================
 -- VIEW: stock_summary
 -- Live stock view: available = stock_qty minus all active locks.
 -- Used by FR11 (out-of-stock indicator) and FR21 (checkout check).
+-- FIX-004: Force view replacement dropping the old definition structure
 -- ============================================================
+
+DROP VIEW IF EXISTS stock_summary CASCADE;
 
 CREATE OR REPLACE VIEW stock_summary AS
 SELECT

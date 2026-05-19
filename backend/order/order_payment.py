@@ -277,6 +277,46 @@ async def place_order(request: Request):
         cur.close()
         conn.close()
 
+@router.get("/api/v1/orders")
+def list_orders():
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT o.*,
+                   COALESCE(
+                       json_agg(
+                           json_build_object(
+                               'item_id',    oi.menu_item_id,
+                               'name',       oi.name,
+                               'quantity',   oi.quantity,
+                               'subtotal',   oi.subtotal,
+                               'unit_price', oi.unit_price
+                           )
+                       ) FILTER (WHERE oi.id IS NOT NULL),
+                       '[]'
+                   ) AS items
+            FROM orders o
+            LEFT JOIN order_items oi ON oi.order_id = o.id
+            GROUP BY o.id
+            ORDER BY o.created_at DESC
+            LIMIT 100
+        """)
+        rows = cur.fetchall()
+        orders = []
+        for r in rows:
+            row = dict(r)
+            # ensure datetimes are serializable
+            for k, v in row.items():
+                if hasattr(v, 'isoformat'):
+                    row[k] = v.isoformat()
+            orders.append(row)
+        return orders
+    finally:
+        cur.close()
+        conn.close()
+
+
 @router.get("/api/v1/orders/{order_id}")
 def get_order(order_id: str):
     conn = get_db()
@@ -287,16 +327,26 @@ def get_order(order_id: str):
         if not order:
             raise HTTPException(status_code=404, detail={"message": "Order not found"})
         order = dict(order)
+        # serialize datetimes
+        for k, v in order.items():
+            if hasattr(v, 'isoformat'):
+                order[k] = v.isoformat()
         cur.execute("SELECT * FROM order_items WHERE order_id = %s", (order_id,))
         order["items"] = [dict(r) for r in cur.fetchall()]
         cur.execute("SELECT * FROM payments WHERE order_id = %s", (order_id,))
         order["payments"] = [dict(r) for r in cur.fetchall()]
-        return {"success": True, "order": order}
+        # lifecycle dashboard expects these field names
+        order.setdefault("total_egp", order.get("total", 0))
+        order.setdefault("placed_at", order.get("created_at"))
+        for item in order["items"]:
+            item.setdefault("subtotal_egp", item.get("subtotal", 0))
+        return order
     finally:
         cur.close()
         conn.close()
 
 
+@router.post("/api/v1/orders/{order_id}/cancel")
 @router.put("/api/v1/orders/{order_id}/cancel")
 async def cancel_order(order_id: str):
     conn = get_db()
@@ -385,11 +435,12 @@ async def confirm_partial_cancel(order_id: str):
         conn.close()
 
 
+@router.patch("/api/v1/orders/{order_id}/status")
 @router.put("/api/v1/orders/{order_id}/status")
 async def update_order_status(order_id: str, request: Request):
     d      = await request.json()
-    status = d.get("status")
-    valid  = {"confirmed", "preparing", "ready_for_pickup", "delivered", "cancelled"}
+    status = d.get("new_status") or d.get("status")
+    valid  = {"confirmed", "preparing", "ready_for_pickup", "delivered", "cancelled", "completed"}
     if status not in valid:
         raise HTTPException(
             status_code=400,
