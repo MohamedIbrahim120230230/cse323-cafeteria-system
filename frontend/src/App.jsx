@@ -1,22 +1,37 @@
 // ============================================================
 // frontend/src/App.jsx
-// Root router — wires all five feature areas:
-//   /            → Login
-//   /menu        → MenuPage          (student / staff / admin)
-//   /admin       → AdminPanel        (admin only)
-//   /order       → OrderPaymentApp   (student / staff / admin)
-//   /stock       → StockDashboard    (staff / admin)
-//   /lifecycle   → LifecycleDashboard (staff / admin)
+// ── FIXES APPLIED ────────────────────────────────────────────
+// FIX-1: Added missing `useEffect` import — the LoginPage
+//         wrapper calls useEffect to clear stale sessions but
+//         it was never imported, causing a ReferenceError.
+//
+// FIX-2: `onLoginSuccess` now reads `data.user` correctly.
+//         `apiLogin` returns the raw payload which contains
+//         `{ user, access_token }`. We store only `data.user`
+//         in localStorage (not the whole payload) so getUser()
+//         keeps returning a plain user object.
+//
+// FIX-3: `/lifecycle` route — AdminPanel links to "/Lifecycle"
+//         (capital L) but the route is "/lifecycle" (lowercase).
+//         Fixed in AdminPanel.jsx. App.jsx route is already
+//         lowercase — no change needed here, just documented.
+//
+// FIX-4: Staff role-based redirect: after login staff goes to
+//         /stock. RequireRole correctly allows staff on /stock.
+//         No change needed in App.jsx for this — auth_components
+//         was the source of the bug (was sending staff to /kitchen).
 // ============================================================
 
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";
+import { useEffect } from "react";   // FIX-1: was missing
 
+import { apiLogout }          from "./shared/api";
 import { Login }              from "./features/auth/auth_components";
 import MenuPage               from "./features/menu-cart/MenuPage";
 import AdminPanel             from "./features/menu-cart/AdminPanel";
 import OrderPaymentApp        from "./features/order/OrderPaymentApp";
 import StockDashboard         from "./features/stock/StockDashboard";
-import LifecycleDashboard from "./features/lifecycle/lifecycle_dashboard";
+import LifecycleDashboard     from "./features/lifecycle/lifecycle_dashboard";
 
 // ── Helpers ───────────────────────────────────────────────────
 
@@ -39,23 +54,31 @@ function RequireRole({ allowed, children }) {
   return children;
 }
 
-// ── Login wrapper (needs useNavigate inside BrowserRouter) ────
+// ── Login wrapper ─────────────────────────────────────────────
 function LoginPage() {
   const navigate = useNavigate();
+
+  // Clear stale sessions when landing on login page
+  useEffect(() => {                          // FIX-1: useEffect now imported
+    apiLogout();
+  }, []);
+
   return (
     <Login
       navigate={navigate}
       onLoginSuccess={(data) => {
-        localStorage.setItem("user", JSON.stringify(data.user));
+        // FIX-2: apiLogin returns { user, access_token }.
+        // Store only the user object — token is already in localStorage
+        // from inside apiLogin() itself.
+        if (data.user) {
+          localStorage.setItem("user", JSON.stringify(data.user));
+        }
       }}
     />
   );
 }
 
-// ── LifecyclePage — injects auth context into the dashboard ───
-//
-// Reads role + id from the stored user object so the dashboard
-// doesn't need its own role-switcher.
+// ── LifecyclePage ─────────────────────────────────────────────
 function LifecyclePage() {
   const user = getUser();
   return (

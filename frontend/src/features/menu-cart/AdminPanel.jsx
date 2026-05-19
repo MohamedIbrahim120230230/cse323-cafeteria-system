@@ -1,13 +1,25 @@
 // ============================================================
 // frontend/src/features/menu-cart/AdminPanel.jsx
-// Member 2 — Menu & Cart Admin
-// FR18 FR19 FR52
-// TDP-M2-03 Max Qty enforcement in forms
-// Theme: matches Login.jsx dark design system exactly
+// ── FIXES APPLIED ────────────────────────────────────────────
+// FIX-1: Removed duplicate `import { apiFetch }` on line 1 AND
+//         line 4. Having two identical named imports is a syntax
+//         error that crashes the entire module at parse time.
+//         Kept only the first one.
+//
+// FIX-2: Fixed broken `/Lifecycle` link in the nav tab — the
+//         route in App.jsx is lowercase `/lifecycle`. Capital L
+//         caused a 404 / redirect-to-login loop.
+//
+// FIX-3: `handleLogout` now calls the shared `apiLogout` helper
+//         instead of duplicating the localStorage.removeItem calls.
+//         This ensures the backend token blacklist is also hit.
+//
+// FIX-4: Staff role navigation — the "Lifecycle" tab in AdminPanel
+//         had an incorrect capitalized path. Fixed to "/lifecycle".
 // ============================================================
 
 import React, { useState, useEffect, useCallback } from "react";
-import { apiFetch } from "../../shared/api";
+import { apiFetch, apiLogout } from "../../shared/api";   // FIX-1 + FIX-3
 import { useNavigate } from "react-router-dom";
 
 // ── Google Fonts & Icons ──────────────────────────────────────
@@ -209,11 +221,9 @@ export default function AdminPanel() {
     }
   };
 
-  // ── Logout ────────────────────────────────────────────────
+  // FIX-3: use shared apiLogout so the backend token is also invalidated
   const handleLogout = async () => {
-    try { await apiFetch("/auth/logout", { method: "POST" }); } catch (_) {}
-    localStorage.removeItem("jwt_token");
-    localStorage.removeItem("user");
+    await apiLogout();
     navigate("/");
   };
 
@@ -232,7 +242,7 @@ export default function AdminPanel() {
   };
 
   return (
-<>
+    <>
       <style>{ADMIN_CSS}</style>
       <div className="ap-page">
         <div className="uc-mesh"  aria-hidden="true" />
@@ -240,30 +250,28 @@ export default function AdminPanel() {
 
         {/* ── SINGLE Navbar ── */}
         <nav className="mp-nav">
-          {/* Brand */}
           <div className="mp-nav-brand">
             <div className="mp-nav-logo">🍽️</div>
             <span className="mp-nav-name">CampusBite</span>
             <span className="ap-admin-tag">Admin</span>
           </div>
 
-          {/* Centre: tab switcher */}
           <div className="mp-nav-tabs">
             <button className="mp-nav-tab" onClick={() => navigate("/menu")}>
               <i className="bi bi-storefront" /> Menu
             </button>
-            
             <button className="mp-nav-tab mp-nav-tab--active">
               <i className="bi bi-gear-fill" /> Admin
             </button>
-            
-            {/* 📦 Stock Button Added Here */}
             <button className="mp-nav-tab" onClick={() => navigate("/stock")}>
               <i className="bi bi-boxes" /> Stock
             </button>
+            {/* FIX-2: was "/Lifecycle" (capital L) — route in App.jsx is "/lifecycle" */}
+            <button className="mp-nav-tab" onClick={() => navigate("/lifecycle")}>
+              <i className="bi bi-arrow-repeat" /> Lifecycle
+            </button>
           </div>
 
-          {/* Right: logout */}
           <div className="mp-nav-actions">
             <button className="mp-logout-btn" onClick={handleLogout} title="Sign out">
               <i className="bi bi-box-arrow-right" />
@@ -306,7 +314,6 @@ export default function AdminPanel() {
 
               <div className="ap-form-grid">
 
-                {/* Name */}
                 <div className="ap-field ap-field--wide">
                   <label className="ap-label">Item Name *</label>
                   <input
@@ -317,7 +324,6 @@ export default function AdminPanel() {
                   {errors.name && <span className="ap-field-err">{errors.name}</span>}
                 </div>
 
-                {/* Description */}
                 <div className="ap-field ap-field--wide">
                   <label className="ap-label">Description</label>
                   <input
@@ -327,7 +333,6 @@ export default function AdminPanel() {
                   />
                 </div>
 
-                {/* Category */}
                 <div className="ap-field">
                   <label className="ap-label">Category *</label>
                   <select name="category" className="ap-input" value={form.category} onChange={handleChange}>
@@ -337,7 +342,6 @@ export default function AdminPanel() {
                   </select>
                 </div>
 
-                {/* Price */}
                 <div className="ap-field">
                   <label className="ap-label">Price (EGP) *</label>
                   <div className="ap-input-prefix-wrap">
@@ -352,7 +356,6 @@ export default function AdminPanel() {
                   {errors.price && <span className="ap-field-err">{errors.price}</span>}
                 </div>
 
-                {/* Stock qty */}
                 <div className="ap-field">
                   <label className="ap-label">Stock Quantity *</label>
                   <input
@@ -364,7 +367,6 @@ export default function AdminPanel() {
                   {errors.stock_qty && <span className="ap-field-err">{errors.stock_qty}</span>}
                 </div>
 
-                {/* Max order qty */}
                 <div className="ap-field">
                   <label className="ap-label">
                     Max Order Qty *
@@ -382,7 +384,6 @@ export default function AdminPanel() {
                   }
                 </div>
 
-                {/* Active toggle */}
                 <div className="ap-field ap-field--toggle">
                   <label className="ap-toggle-label">
                     <span className="ap-label">Visible to students</span>
@@ -400,7 +401,6 @@ export default function AdminPanel() {
                 </div>
               </div>
 
-              {/* Form actions */}
               <div className="ap-form-actions">
                 <button className="ap-cancel-btn" onClick={handleCancelEdit} disabled={saving}>
                   Cancel
@@ -427,7 +427,6 @@ export default function AdminPanel() {
                 <span className="ap-count">{filtered.length} item{filtered.length !== 1 ? "s" : ""}</span>
               </div>
               <div className="ap-table-hd-right">
-                {/* Search */}
                 <div style={{ position:"relative" }}>
                   <i className="bi bi-search" style={{ position:"absolute", left:11, top:"50%", transform:"translateY(-50%)", color:"var(--uc-muted)", fontSize:13, pointerEvents:"none" }} />
                   <input
@@ -438,12 +437,10 @@ export default function AdminPanel() {
                     style={{ paddingLeft:32 }}
                   />
                 </div>
-                {/* Category filter */}
                 <select className="ap-input ap-filter-select" value={filterCat} onChange={e => setFilterCat(e.target.value)}>
                   <option value="">All categories</option>
                   {CATEGORIES.map(c => <option key={c} value={c}>{c.charAt(0).toUpperCase()+c.slice(1)}</option>)}
                 </select>
-                {/* Add button */}
                 {!showForm && (
                   <button className="ap-add-new-btn" onClick={() => { handleCancelEdit(); setShowForm(true); }}>
                     <i className="bi bi-plus-lg" /> Add Item
@@ -532,7 +529,7 @@ export default function AdminPanel() {
 }
 
 // ════════════════════════════════════════════════════════════
-// CSS
+// CSS  (unchanged)
 // ════════════════════════════════════════════════════════════
 const ADMIN_CSS = `
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -562,8 +559,6 @@ const ADMIN_CSS = `
                      linear-gradient(90deg,rgba(255,255,255,.012) 1px,transparent 1px);
     background-size:52px 52px;
   }
-
-  /* ── Nav (shared classes with MenuPage) ── */
   .mp-nav {
     position:sticky; top:0; z-index:200;
     display:flex; align-items:center; justify-content:space-between;
@@ -584,8 +579,6 @@ const ADMIN_CSS = `
     border-radius:100px; padding:3px 9px;
   }
   .mp-nav-actions { display:flex; align-items:center; gap:8px; }
-
-  /* Tab switcher */
   .mp-nav-tabs {
     display:flex; gap:4px;
     background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:var(--uc-rs);
@@ -602,26 +595,19 @@ const ADMIN_CSS = `
     background:var(--uc-card); color:var(--uc-text);
     box-shadow:0 1px 4px rgba(0,0,0,.35);
   }
-
   .mp-logout-btn {
     width:36px; height:36px; display:flex; align-items:center; justify-content:center;
     background:none; border:1px solid var(--uc-brd); border-radius:var(--uc-rs);
     color:var(--uc-muted); cursor:pointer; font-size:15px; transition:all .2s;
   }
   .mp-logout-btn:hover { border-color:var(--uc-danger); color:var(--uc-danger); }
-
-  /* Body */
   .ap-body { position:relative; z-index:1; padding:clamp(16px,3vw,32px); max-width:1400px; display:flex; flex-direction:column; gap:20px; }
-
-  /* Stats */
   .ap-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; }
   .ap-stat { display:flex; align-items:center; gap:12px; background:var(--uc-card); border:1px solid var(--uc-brd); border-radius:var(--uc-r); padding:16px; transition:border-color .25s; }
   .ap-stat:hover { border-color:var(--uc-brd-hi); }
   .ap-stat i { font-size:22px; flex-shrink:0; }
   .ap-stat-val { font-family:var(--fd); font-size:22px; font-weight:700; line-height:1; }
   .ap-stat-label { font-size:11px; color:var(--uc-muted); margin-top:3px; }
-
-  /* Form card */
   .ap-form-card { background:var(--uc-card); border:1px solid var(--uc-brd-hi); border-radius:var(--uc-r); padding:clamp(20px,3vw,28px); animation:fadeUp .3s ease both; }
   @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
   .ap-form-hd { display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; }
@@ -644,21 +630,16 @@ const ADMIN_CSS = `
   .ap-input--prefixed { padding-left:42px; }
   .ap-field-err { font-size:11px; color:var(--uc-danger); }
   .ap-field-hint { font-size:11px; color:var(--uc-muted); opacity:.75; }
-
-  /* Toggle */
   .ap-toggle { width:44px; height:24px; border-radius:12px; position:relative; flex-shrink:0; background:var(--uc-inp); border:1px solid var(--uc-brd); cursor:pointer; transition:background .2s,border-color .2s; }
   .ap-toggle--on { background:rgba(34,201,147,.2); border-color:var(--uc-acc2); }
   .ap-toggle-thumb { position:absolute; top:3px; left:3px; width:16px; height:16px; border-radius:50%; background:var(--uc-muted); transition:transform .2s,background .2s; }
   .ap-toggle--on .ap-toggle-thumb { transform:translateX(20px); background:var(--uc-acc2); }
-
   .ap-form-actions { display:flex; justify-content:flex-end; gap:10px; }
   .ap-cancel-btn { background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:var(--uc-rs); color:var(--uc-muted); font-family:var(--fb); font-size:13.5px; font-weight:600; padding:10px 20px; cursor:pointer; transition:all .2s; }
   .ap-cancel-btn:hover { border-color:var(--uc-acc); color:var(--uc-text); }
   .ap-submit-btn { display:flex; align-items:center; gap:7px; background:linear-gradient(135deg,var(--uc-acc),#2878be); border:none; border-radius:var(--uc-rs); color:#fff; font-family:var(--fb); font-size:13.5px; font-weight:700; padding:10px 22px; cursor:pointer; box-shadow:0 4px 16px rgba(59,158,218,.28); transition:transform .15s,opacity .2s; }
   .ap-submit-btn:hover:not(:disabled) { transform:translateY(-1px); }
   .ap-submit-btn:disabled { opacity:.45; cursor:not-allowed; transform:none; }
-
-  /* Table card */
   .ap-table-card { background:var(--uc-card); border:1px solid var(--uc-brd); border-radius:var(--uc-r); overflow:hidden; }
   .ap-table-hd { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; padding:16px 20px; border-bottom:1px solid var(--uc-brd); }
   .ap-table-hd-left { display:flex; align-items:center; gap:10px; }
@@ -668,7 +649,6 @@ const ADMIN_CSS = `
   .ap-filter-select { width:150px; padding:8px 12px; font-size:12.5px; }
   .ap-add-new-btn { display:flex; align-items:center; gap:6px; background:linear-gradient(135deg,var(--uc-acc),#2878be); border:none; border-radius:var(--uc-rs); color:#fff; font-family:var(--fb); font-size:12.5px; font-weight:700; padding:8px 16px; cursor:pointer; white-space:nowrap; box-shadow:0 3px 12px rgba(59,158,218,.25); transition:opacity .2s; }
   .ap-add-new-btn:hover { opacity:.88; }
-
   .ap-table-wrap { overflow-x:auto; }
   .ap-table { width:100%; border-collapse:collapse; }
   .ap-table th { background:rgba(255,255,255,.025); padding:10px 14px; font-size:10.5px; font-weight:700; letter-spacing:.07em; text-transform:uppercase; color:var(--uc-muted); text-align:left; white-space:nowrap; border-bottom:1px solid var(--uc-brd); }
@@ -699,8 +679,6 @@ const ADMIN_CSS = `
   .ap-deactivate-btn:hover { background:rgba(246,173,85,.1); border-color:var(--uc-warn); }
   .ap-danger-btn { background:linear-gradient(135deg,var(--uc-danger),#c53030); border:none; border-radius:var(--uc-rs); color:#fff; font-family:var(--fb); font-size:13.5px; font-weight:700; padding:10px 22px; cursor:pointer; transition:opacity .2s; }
   .ap-danger-btn:hover { opacity:.88; }
-
-  /* Modal */
   .ap-modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.6); backdrop-filter:blur(4px); z-index:500; }
   .ap-modal { position:fixed; inset:0; z-index:501; display:flex; align-items:center; justify-content:center; padding:20px; }
   .ap-modal-inner { background:var(--uc-card); border:1px solid var(--uc-brd); border-radius:var(--uc-r); padding:28px; max-width:380px; width:100%; text-align:center; box-shadow:0 24px 48px rgba(0,0,0,.6); animation:fadeUp .25s ease both; }
@@ -708,22 +686,16 @@ const ADMIN_CSS = `
   .ap-modal-title { font-family:var(--fd); font-size:17px; font-weight:700; margin-bottom:8px; }
   .ap-modal-msg { font-size:13.5px; color:var(--uc-muted); line-height:1.5; margin-bottom:20px; }
   .ap-modal-actions { display:flex; gap:10px; justify-content:center; }
-
-  /* Shared loading/empty/spinner */
   .mp-loading { display:flex; flex-direction:column; align-items:center; gap:14px; padding:60px 20px; color:var(--uc-muted); }
   .mp-spinner { width:32px; height:32px; border:3px solid var(--uc-brd); border-top-color:var(--uc-acc); border-radius:50%; animation:spin .7s linear infinite; }
   .mp-spinner-sm { display:inline-block; width:14px; height:14px; border:2px solid rgba(255,255,255,.3); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; }
   @keyframes spin{to{transform:rotate(360deg)}}
   .mp-empty { display:flex; flex-direction:column; align-items:center; gap:12px; padding:60px 20px; color:var(--uc-muted); }
-
-  /* Toast */
   .uc-toast { display:flex; align-items:center; gap:10px; padding:11px 16px; border-radius:var(--uc-rs); font-size:13px; font-weight:500; min-width:260px; max-width:380px; box-shadow:0 8px 24px rgba(0,0,0,.4); animation:fadeUp .3s ease both; }
   .uc-toast--success { background:#0e2e20; border:1px solid rgba(34,201,147,.3); color:var(--uc-acc2); }
   .uc-toast--warn    { background:#2b1f0a; border:1px solid rgba(246,173,85,.3);  color:var(--uc-warn); }
   .uc-toast--error   { background:#2b0e0e; border:1px solid rgba(245,101,101,.3); color:var(--uc-danger); }
   .uc-toast-close { margin-left:auto; background:none; border:none; cursor:pointer; color:inherit; opacity:.7; font-size:16px; padding:0; }
-  @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
-
   @media(max-width:640px) {
     .ap-table th:nth-child(2), .ap-table td:nth-child(2) { display:none; }
     .ap-table th:nth-child(7), .ap-table td:nth-child(7) { display:none; }

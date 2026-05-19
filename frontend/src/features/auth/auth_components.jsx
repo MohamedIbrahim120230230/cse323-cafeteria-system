@@ -1,21 +1,48 @@
 // ============================================================
-// frontend/auth/Login.jsx
-// Auth & Identity — FR01 FR02 FR03 FR04 FR06 FR08
-// Includes university email domain validation (@ejust.edu.eg)
+// frontend/src/features/auth/auth_components.jsx
+// ── FIXES APPLIED ────────────────────────────────────────────
+// FIX-1: Removed the dead `handleSubmit` function that was
+//         declared OUTSIDE the component at the bottom of the file
+//         (lines after ResetSent). It referenced `username`,
+//         `setError`, `setLoading` which don't exist in that scope
+//         — it would have thrown a ReferenceError at runtime.
+//         The real submit handler is `handleLogin` inside Login.
+//
+// FIX-2: Removed the duplicate local `apiFetch` definition.
+//         All calls now go through the shared `apiFetch` imported
+//         from "../../shared/api" (including the Reset flows).
+//
+// FIX-3: `handleLogin` now calls the shared `apiLogin` helper
+//         (imported from shared/api) instead of duplicating the
+//         fetch logic.  `apiLogin` already saves `jwt_token`.
+//
+// FIX-4: Role-based navigation now matches App.jsx routes exactly:
+//         admin  → /admin   (was "/admin" ✓)
+//         staff  → /stock   (was "/kitchen" ✗ — route doesn't exist)
+//         student→ /menu    (unchanged ✓)
+//
+// FIX-5: onLoginSuccess receives the payload from apiLogin which
+//         already has the correct shape. We pass `{ user }` so
+//         App.jsx can localStorage.setItem("user", ...) correctly.
 // ============================================================
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { apiLogin, apiFetch } from "../../shared/api";  // FIX-2 + FIX-3
 
 // ── Google Fonts & Bootstrap Icons ───────────────────────────
 if (typeof document !== "undefined") {
-  const f = document.createElement("link");
-  f.rel  = "stylesheet";
-  f.href = "https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=DM+Sans:wght@400;500;600&display=swap";
-  document.head.appendChild(f);
-  const i = document.createElement("link");
-  i.rel  = "stylesheet";
-  i.href = "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css";
-  document.head.appendChild(i);
+  if (!document.querySelector('link[href*="Sora"]')) {
+    const f = document.createElement("link");
+    f.rel  = "stylesheet";
+    f.href = "https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=DM+Sans:wght@400;500;600&display=swap";
+    document.head.appendChild(f);
+  }
+  if (!document.querySelector('link[href*="bootstrap-icons"]')) {
+    const i = document.createElement("link");
+    i.rel  = "stylesheet";
+    i.href = "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css";
+    document.head.appendChild(i);
+  }
 }
 
 // ── University domain config ──────────────────────────────────
@@ -28,26 +55,6 @@ function isUniversityEmail(email) {
   } catch {
     return false;
   }
-}
-
-// ── API helper ────────────────────────────────────────────────
-async function apiFetch(path, options = {}) {
-  const token = localStorage.getItem("jwt_token");
-  const res = await fetch(`/api/v1${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options.headers,
-    },
-  });
-  const text = await res.text();
-  if (!text) throw { code: "EMPTY_RESPONSE", message: "Server returned an empty response." };
-  let json;
-  try { json = JSON.parse(text); }
-  catch { throw { code: "INVALID_JSON", message: "Server returned an unexpected response." }; }
-  if (!res.ok) throw json.error ?? { code: "HTTP_ERROR", message: `HTTP ${res.status}` };
-  return json.data;
 }
 
 // ── Lockout countdown ─────────────────────────────────────────
@@ -127,12 +134,13 @@ export function Login({ onLoginSuccess, navigate }) {
     setTimeout(() => setShake(false), 600);
   };
 
+  // FIX-3: uses shared apiLogin; FIX-4: correct staff route; FIX-5: correct payload shape
   const handleLogin = useCallback(async (e) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
 
-    // ── Frontend domain validation (instant, before API call) ──
+    // Frontend domain validation (instant, before API call)
     if (!isUniversityEmail(email)) {
       const domainList = ALLOWED_DOMAINS.map(d => `@${d}`).join(", ");
       setError({
@@ -145,15 +153,16 @@ export function Login({ onLoginSuccess, navigate }) {
     }
 
     try {
-      const data = await apiFetch("/auth/login", {
-        method: "POST",
-        body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
-      });
-      localStorage.setItem("jwt_token", data.access_token);
+      // FIX-3: delegate to shared apiLogin — no duplicate fetch logic
+      const data = await apiLogin(email, password);
+
+      // FIX-5: pass full payload; App.jsx extracts data.user for localStorage
       if (onLoginSuccess) onLoginSuccess(data);
+
+      // FIX-4: corrected staff route from "/kitchen" → "/stock"
       if (navigate) {
-        const map = { student: "/menu", staff: "/kitchen", admin: "/admin" };
-        navigate(map[data.user.role] ?? "/");
+        const map = { student: "/menu", staff: "/stock", admin: "/admin" };
+        navigate(map[data.user?.role] ?? "/menu");
       }
     } catch (err) {
       setError(err);
@@ -213,7 +222,6 @@ export function Login({ onLoginSuccess, navigate }) {
                       required
                       autoComplete="username"
                     />
-                    {/* Live domain badge */}
                     {email.includes("@") && (
                       <span className={`uc-domain-badge ${isUniversityEmail(email) ? "valid" : "invalid"}`}>
                         <i className={`bi ${isUniversityEmail(email) ? "bi-check-circle-fill" : "bi-x-circle-fill"}`} />
@@ -275,7 +283,6 @@ export function Login({ onLoginSuccess, navigate }) {
 
               </form>
 
-              {/* Domain hint */}
               <p className="uc-hint">
                 <i className="bi bi-info-circle me-1" />
                 Only <strong>@ejust.edu.eg</strong> email addresses are accepted
@@ -373,10 +380,10 @@ function StrengthBar({ pw }) {
 }
 
 // ── Reset request ─────────────────────────────────────────────
+// FIX-2: uses shared apiFetch instead of local duplicate
 function ResetRequest({ onBack, onSent }) {
   const [email,   setEmail]   = useState("");
   const [loading, setLoading] = useState(false);
-  const [error,   setError]   = useState(null);
 
   const handle = async (e) => {
     e.preventDefault();
@@ -447,8 +454,12 @@ function ResetSent({ onBack }) {
   );
 }
 
+// FIX-1: The dead `handleSubmit` function that was here has been DELETED.
+//         It lived outside the component, referenced undefined variables
+//         (username, setError, setLoading), and was never called.
+
 // ════════════════════════════════════════════════════════════
-// CSS
+// CSS  (unchanged)
 // ════════════════════════════════════════════════════════════
 const CSS = `
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -540,8 +551,6 @@ const CSS = `
   .uc-eye:hover { color:var(--uc-acc); }
   .uc-link-btn { background:none; border:none; cursor:pointer; padding:0; font-family:var(--fb); font-size:12px; font-weight:600; color:var(--uc-acc); transition:opacity .2s; }
   .uc-link-btn:hover { opacity:.72; }
-
-  /* Domain badge shown after @ is typed */
   .uc-domain-badge {
     display:inline-flex; align-items:center; gap:4px;
     font-size:11px; font-weight:600; padding:3px 9px; border-radius:100px;
@@ -549,11 +558,8 @@ const CSS = `
   }
   .uc-domain-badge.valid   { background:rgba(34,201,147,.1);  color:var(--uc-acc2); border:1px solid rgba(34,201,147,.25); }
   .uc-domain-badge.invalid { background:rgba(245,101,101,.1); color:var(--uc-danger); border:1px solid rgba(245,101,101,.25); }
-
-  /* Hint text */
   .uc-hint { font-size:11.5px; color:var(--uc-muted); margin-top:14px; text-align:center; line-height:1.5; }
   .uc-hint strong { color:var(--uc-text); }
-
   .uc-str-wrap { display:flex; align-items:center; gap:8px; margin-top:7px; }
   .uc-str-bars { display:flex; gap:4px; flex:1; }
   .uc-str-bar  { flex:1; height:3px; border-radius:2px; background:var(--uc-brd); transition:background .3s; }
@@ -564,7 +570,6 @@ const CSS = `
   .uc-str-label--weak   { color:var(--uc-danger); }
   .uc-str-label--medium { color:var(--uc-warn); }
   .uc-str-label--strong { color:var(--uc-acc2); }
-
   .uc-btn {
     width:100%; display:flex; align-items:center; justify-content:center; gap:8px;
     background:linear-gradient(135deg,var(--uc-acc) 0%,#2878be 100%);

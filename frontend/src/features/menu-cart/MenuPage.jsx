@@ -1,13 +1,22 @@
 // ============================================================
 // frontend/src/features/menu-cart/MenuPage.jsx
-// Member 2 — Menu & Cart
-// FR09 FR10 FR11 FR12 FR13 FR14 FR15 FR16 FR17
-// TDP-M2-01 Voucher  · TDP-M2-02 Cart Lock · TDP-M2-03 Max Qty
-// Theme: matches Login.jsx dark design system
+// ── FIXES APPLIED ────────────────────────────────────────────
+// FIX-1: Staff users now see nav tabs too. The original code
+//         only showed tabs when `isAdmin`. Staff also need to
+//         navigate to /stock and /lifecycle. Now both admin
+//         and staff see the relevant tabs (staff sees Stock +
+//         Lifecycle but NOT Admin).
+//
+// FIX-2: handleLogout now uses shared `apiLogout` helper
+//         so the backend token blacklist endpoint is also hit,
+//         consistent with all other feature files.
+//
+// FIX-3: The nav tab for /lifecycle was missing entirely from
+//         MenuPage. Added it so admin/staff can reach it.
 // ============================================================
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { apiFetch } from "../../shared/api";
+import { apiFetch, apiLogout } from "../../shared/api";   // FIX-2
 import { useNavigate } from "react-router-dom";
 
 // ── Google Fonts & Icons (same as Login) ─────────────────────
@@ -34,7 +43,7 @@ const CATEGORIES = [
   { value: "snacks",     label: "Snacks",    icon: "bi-cookie"            },
 ];
 
-// ── TDP-M2-01 P5: exact error messages map ────────────────────
+// ── Voucher error messages ────────────────────────────────────
 const VOUCHER_ERRORS = {
   VOUCHER_ALREADY_USED:    "Voucher has already been used by your account.",
   VOUCHER_EXPIRED:         "Voucher has expired.",
@@ -78,9 +87,11 @@ export default function MenuPage() {
   const navigate                  = useNavigate();
   const { toasts, addToast, removeToast } = useToast();
 
-  // ── Read role from localStorage (set during login) ────────
+  // FIX-1: read both role flags
   const currentUser = JSON.parse(localStorage.getItem("user") || "{}");
   const isAdmin     = currentUser.role === "admin";
+  const isStaff     = currentUser.role === "staff";
+  const isPrivileged = isAdmin || isStaff;   // FIX-1: staff also gets nav tabs
 
   // Menu state
   const [items,     setItems]     = useState([]);
@@ -95,12 +106,12 @@ export default function MenuPage() {
   const [lockWarnings,  setLockWarnings]  = useState([]);
 
   // Voucher state
-  const [voucher,         setVoucher]         = useState("");
-  const [voucherApplied,  setVoucherApplied]  = useState(false);
-  const [discount,        setDiscount]        = useState(0);
-  const [appliedVoucherObj, setAppliedVoucherObj] = useState(null);
-  const [voucherLoading,  setVoucherLoading]  = useState(false);
-  const [voucherError,    setVoucherError]    = useState("");
+  const [voucher,            setVoucher]            = useState("");
+  const [voucherApplied,     setVoucherApplied]     = useState(false);
+  const [discount,           setDiscount]           = useState(0);
+  const [appliedVoucherObj,  setAppliedVoucherObj]  = useState(null);
+  const [voucherLoading,     setVoucherLoading]     = useState(false);
+  const [voucherError,       setVoucherError]       = useState("");
 
   // Checkout state
   const [checkoutLoading, setCheckoutLoading] = useState(false);
@@ -116,7 +127,7 @@ export default function MenuPage() {
       if (search.trim()) params.append("search", search.trim());
       const data = await apiFetch(`/menu/items?${params}`);
       setItems(data.items || data || []);
-    } catch (err) {
+    } catch {
       addToast("Failed to load menu.", "error");
     } finally {
       setLoading(false);
@@ -206,7 +217,7 @@ export default function MenuPage() {
       setVoucherApplied(true);
       setAppliedVoucherObj({
         code: voucher.trim().toUpperCase(),
-        discount_type: data.discount_type ?? "flat",
+        discount_type:  data.discount_type  ?? "flat",
         discount_value: data.discount ?? data.discount_egp ?? 0,
       });
       addToast(`Voucher applied! You save ${discountAmt.toFixed(2)} EGP`, "success");
@@ -231,10 +242,7 @@ export default function MenuPage() {
     addToast("Voucher removed.", "success");
   };
 
-  // ── Checkout — lock cart then hand off to OrderPaymentApp ───
-  // Instead of calling /cart/lock and navigating blind, we pass
-  // the full cart + pricing through location.state so
-  // OrderPaymentApp doesn't need its own cart/menu.
+  // ── Checkout ─────────────────────────────────────────────────
   const handleCheckout = async () => {
     if (cart.length === 0) return;
     setCheckoutLoading(true);
@@ -250,16 +258,14 @@ export default function MenuPage() {
         return;
       }
 
-      // ── Hand off to OrderPaymentApp with full cart state ──
       navigate("/order", {
         state: {
           cart,
           subtotal,
-          discount:     appliedDiscount,
-          total:        finalTotal,
-          voucherCode:  appliedVoucherObj?.code ?? null,
-          // Pre-built order from lock response (may contain order id)
-          lockedOrder:  data.order ?? null,
+          discount:    appliedDiscount,
+          total:       finalTotal,
+          voucherCode: appliedVoucherObj?.code ?? null,
+          lockedOrder: data.order ?? null,
         },
       });
 
@@ -277,17 +283,14 @@ export default function MenuPage() {
     }
   };
 
-  // Confirm after price-change warnings
   const confirmWarningsAndCheckout = async () => {
     setLockWarnings([]);
     await handleCheckout();
   };
 
-  // ── Logout ───────────────────────────────────────────────────
+  // FIX-2: use shared apiLogout
   const handleLogout = async () => {
-    try { await apiFetch("/auth/logout", { method: "POST" }); } catch (_) {}
-    localStorage.removeItem("jwt_token");
-    localStorage.removeItem("user");
+    await apiLogout();
     navigate("/");
   };
 
@@ -303,28 +306,32 @@ export default function MenuPage() {
 
         {/* ── SINGLE Navbar ── */}
         <nav className="mp-nav">
-          {/* Brand */}
           <div className="mp-nav-brand">
             <div className="mp-nav-logo">🍽️</div>
             <span className="mp-nav-name">CampusBite</span>
           </div>
 
-          {/* Centre: tab switcher — admin sees menu, admin, and stock tabs */}
-          {isAdmin && (
+          {/* FIX-1 + FIX-3: staff AND admin see tabs; staff doesn't see /admin */}
+          {isPrivileged && (
             <div className="mp-nav-tabs">
               <button className="mp-nav-tab mp-nav-tab--active">
                 <i className="bi bi-storefront" /> Menu
               </button>
-              <button className="mp-nav-tab" onClick={() => navigate("/admin")}>
-                <i className="bi bi-gear-fill" /> Admin
-              </button>
+              {isAdmin && (
+                <button className="mp-nav-tab" onClick={() => navigate("/admin")}>
+                  <i className="bi bi-gear-fill" /> Admin
+                </button>
+              )}
               <button className="mp-nav-tab" onClick={() => navigate("/stock")}>
                 <i className="bi bi-boxes" /> Stock
+              </button>
+              {/* FIX-3: Lifecycle tab was missing from MenuPage entirely */}
+              <button className="mp-nav-tab" onClick={() => navigate("/lifecycle")}>
+                <i className="bi bi-arrow-repeat" /> Lifecycle
               </button>
             </div>
           )}
 
-          {/* Right: cart + logout */}
           <div className="mp-nav-actions">
             <button
               className="mp-cart-btn"
@@ -392,7 +399,7 @@ export default function MenuPage() {
               ))}
             </div>
 
-            {/* Lock warnings banner — TDP-M2-02 P2 */}
+            {/* Lock warnings banner */}
             {lockWarnings.length > 0 && (
               <div className="mp-warn-banner">
                 <i className="bi bi-exclamation-triangle-fill" />
@@ -576,7 +583,7 @@ function CartPanel({
             ))}
           </div>
 
-          {/* Voucher — TDP-M2-01 */}
+          {/* Voucher */}
           {!cartLocked && (
             <div className="mp-voucher">
               {voucherApplied ? (
@@ -674,178 +681,85 @@ const MENU_CSS = `
     --uc-r:14px; --uc-rs:9px;
     --fd:'Sora',sans-serif; --fb:'DM Sans',sans-serif;
   }
-
-  .mp-page {
-    min-height:100vh; background:var(--uc-bg); color:var(--uc-text);
-    font-family:var(--fb); position:relative; overflow-x:hidden;
-  }
+  .mp-page { min-height:100vh; background:var(--uc-bg); color:var(--uc-text); font-family:var(--fb); position:relative; overflow-x:hidden; }
   .uc-mesh { position:fixed; inset:0; z-index:0; pointer-events:none; overflow:hidden; }
-  .uc-mesh::before {
-    content:''; position:absolute; inset:-40%;
-    background:
-      radial-gradient(ellipse 65% 55% at 15% 25%,rgba(59,158,218,.10) 0%,transparent 60%),
-      radial-gradient(ellipse 55% 45% at 85% 75%,rgba(34,201,147,.07) 0%,transparent 55%),
-      radial-gradient(ellipse 45% 55% at 55% 5%, rgba(246,201,14,.05) 0%,transparent 50%);
-    animation:meshMove 18s ease-in-out infinite alternate;
-  }
+  .uc-mesh::before { content:''; position:absolute; inset:-40%;
+    background: radial-gradient(ellipse 65% 55% at 15% 25%,rgba(59,158,218,.10) 0%,transparent 60%),
+                radial-gradient(ellipse 55% 45% at 85% 75%,rgba(34,201,147,.07) 0%,transparent 55%),
+                radial-gradient(ellipse 45% 55% at 55% 5%, rgba(246,201,14,.05) 0%,transparent 50%);
+    animation:meshMove 18s ease-in-out infinite alternate; }
   @keyframes meshMove { from{transform:translate(0,0) rotate(0)} to{transform:translate(2%,1.5%) rotate(2deg)} }
-  .uc-grid {
-    position:fixed; inset:0; z-index:0; pointer-events:none;
+  .uc-grid { position:fixed; inset:0; z-index:0; pointer-events:none;
     background-image:linear-gradient(rgba(255,255,255,.014) 1px,transparent 1px),
                      linear-gradient(90deg,rgba(255,255,255,.014) 1px,transparent 1px);
-    background-size:52px 52px;
-  }
-
-  /* ── Nav ── */
-  .mp-nav {
-    position:sticky; top:0; z-index:200;
-    display:flex; align-items:center; justify-content:space-between;
+    background-size:52px 52px; }
+  .mp-nav { position:sticky; top:0; z-index:200; display:flex; align-items:center; justify-content:space-between;
     padding:0 clamp(16px,3vw,32px); height:60px;
-    background:rgba(8,13,20,.85); backdrop-filter:blur(16px);
-    border-bottom:1px solid var(--uc-brd);
-  }
+    background:rgba(8,13,20,.85); backdrop-filter:blur(16px); border-bottom:1px solid var(--uc-brd); }
   .mp-nav-brand { display:flex; align-items:center; gap:10px; }
-  .mp-nav-logo {
-    width:36px; height:36px; border-radius:10px;
-    background:linear-gradient(135deg,var(--uc-acc),var(--uc-acc2));
-    display:flex; align-items:center; justify-content:center; font-size:16px;
-  }
+  .mp-nav-logo { width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg,var(--uc-acc),var(--uc-acc2));
+    display:flex; align-items:center; justify-content:center; font-size:16px; }
   .mp-nav-name { font-family:var(--fd); font-size:16px; font-weight:700; letter-spacing:-.02em; }
   .mp-nav-actions { display:flex; align-items:center; gap:8px; }
-
-  /* Tab switcher */
-  .mp-nav-tabs {
-    display:flex; gap:4px;
-    background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:var(--uc-rs);
-    padding:3px;
-  }
-  .mp-nav-tab {
-    display:flex; align-items:center; gap:6px;
-    background:none; border:none; border-radius:7px;
+  .mp-nav-tabs { display:flex; gap:4px; background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:var(--uc-rs); padding:3px; }
+  .mp-nav-tab { display:flex; align-items:center; gap:6px; background:none; border:none; border-radius:7px;
     color:var(--uc-muted); font-family:var(--fb); font-size:12.5px; font-weight:600;
-    padding:5px 14px; cursor:pointer; transition:all .2s; white-space:nowrap;
-  }
+    padding:5px 14px; cursor:pointer; transition:all .2s; white-space:nowrap; }
   .mp-nav-tab:hover { color:var(--uc-text); background:rgba(255,255,255,.05); }
-  .mp-nav-tab--active {
-    background:var(--uc-card); color:var(--uc-text);
-    box-shadow:0 1px 4px rgba(0,0,0,.35);
-  }
-
-  /* Cart button */
-  .mp-cart-btn {
-    display:flex; align-items:center; gap:6px; position:relative;
+  .mp-nav-tab--active { background:var(--uc-card); color:var(--uc-text); box-shadow:0 1px 4px rgba(0,0,0,.35); }
+  .mp-cart-btn { display:flex; align-items:center; gap:6px; position:relative;
     background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:var(--uc-rs);
     color:var(--uc-text); font-family:var(--fb); font-size:13px; font-weight:600;
-    padding:7px 14px; cursor:pointer; transition:border-color .2s,background .2s;
-  }
+    padding:7px 14px; cursor:pointer; transition:border-color .2s,background .2s; }
   .mp-cart-btn:hover { border-color:var(--uc-acc); background:rgba(59,158,218,.07); }
-  .mp-cart-badge {
-    position:absolute; top:-6px; right:-6px;
-    width:18px; height:18px; border-radius:50%;
+  .mp-cart-badge { position:absolute; top:-6px; right:-6px; width:18px; height:18px; border-radius:50%;
     background:var(--uc-acc); color:#fff; font-size:10px; font-weight:700;
-    display:flex; align-items:center; justify-content:center;
-    border:2px solid var(--uc-bg);
-  }
+    display:flex; align-items:center; justify-content:center; border:2px solid var(--uc-bg); }
   .mp-cart-label { display:none; }
   @media(min-width:640px) { .mp-cart-label { display:inline; } }
-
-  .mp-logout-btn {
-    width:36px; height:36px; display:flex; align-items:center; justify-content:center;
+  .mp-logout-btn { width:36px; height:36px; display:flex; align-items:center; justify-content:center;
     background:none; border:1px solid var(--uc-brd); border-radius:var(--uc-rs);
-    color:var(--uc-muted); cursor:pointer; font-size:15px; transition:all .2s;
-  }
+    color:var(--uc-muted); cursor:pointer; font-size:15px; transition:all .2s; }
   .mp-logout-btn:hover { border-color:var(--uc-danger); color:var(--uc-danger); }
-
-  /* ── Layout ── */
-  .mp-layout {
-    position:relative; z-index:1;
-    display:grid; grid-template-columns:1fr;
-    min-height:calc(100vh - 60px);
-    transition:grid-template-columns .3s;
-  }
-  @media(min-width:1024px) {
-    .mp-layout--cart-open { grid-template-columns:1fr 380px; }
-  }
-
-  /* ── Main ── */
+  .mp-layout { position:relative; z-index:1; display:grid; grid-template-columns:1fr; min-height:calc(100vh - 60px); transition:grid-template-columns .3s; }
+  @media(min-width:1024px) { .mp-layout--cart-open { grid-template-columns:1fr 380px; } }
   .mp-main { padding:clamp(16px,3vw,32px); width:100%; }
   .mp-header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:20px; }
   .mp-title { font-family:var(--fd); font-size:clamp(20px,3vw,28px); font-weight:700; letter-spacing:-.02em; }
   .mp-subtitle { font-size:13px; color:var(--uc-muted); margin-top:3px; }
-
-  /* ── Search ── */
-  .mp-search-wrap {
-    position:relative; display:flex; align-items:center; gap:8px;
-    margin-bottom:18px;
-  }
+  .mp-search-wrap { position:relative; display:flex; align-items:center; gap:8px; margin-bottom:18px; }
   .mp-search-ico { position:absolute; left:13px; color:var(--uc-muted); font-size:14px; pointer-events:none; }
-  .mp-search {
-    flex:1; background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:var(--uc-rs);
+  .mp-search { flex:1; background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:var(--uc-rs);
     color:var(--uc-text); font-family:var(--fb); font-size:14px; padding:10px 36px 10px 38px;
-    outline:none; transition:border-color .2s,box-shadow .2s;
-  }
+    outline:none; transition:border-color .2s,box-shadow .2s; }
   .mp-search::placeholder { color:rgba(107,122,144,.55); }
   .mp-search:focus { border-color:var(--uc-acc); box-shadow:0 0 0 3px rgba(59,158,218,.12); }
-  .mp-search-clear {
-    position:absolute; right:90px; background:none; border:none; cursor:pointer;
-    color:var(--uc-muted); font-size:16px; padding:4px; transition:color .2s;
-  }
+  .mp-search-clear { position:absolute; right:90px; background:none; border:none; cursor:pointer; color:var(--uc-muted); font-size:16px; padding:4px; transition:color .2s; }
   .mp-search-clear:hover { color:var(--uc-text); }
-  .mp-search-btn {
-    flex-shrink:0; background:linear-gradient(135deg,var(--uc-acc),#2878be);
-    border:none; border-radius:var(--uc-rs); color:#fff;
-    font-family:var(--fb); font-size:13px; font-weight:600;
-    padding:10px 18px; cursor:pointer; transition:opacity .2s;
-  }
+  .mp-search-btn { flex-shrink:0; background:linear-gradient(135deg,var(--uc-acc),#2878be); border:none; border-radius:var(--uc-rs);
+    color:#fff; font-family:var(--fb); font-size:13px; font-weight:600; padding:10px 18px; cursor:pointer; transition:opacity .2s; }
   .mp-search-btn:hover { opacity:.88; }
-
-  /* ── Category pills ── */
   .mp-cats { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:20px; }
-  .mp-cat {
-    display:flex; align-items:center; gap:6px;
-    background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:100px;
-    color:var(--uc-muted); font-family:var(--fb); font-size:12.5px; font-weight:600;
-    padding:6px 14px; cursor:pointer; transition:all .2s;
-  }
+  .mp-cat { display:flex; align-items:center; gap:6px; background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:100px;
+    color:var(--uc-muted); font-family:var(--fb); font-size:12.5px; font-weight:600; padding:6px 14px; cursor:pointer; transition:all .2s; }
   .mp-cat:hover { border-color:var(--uc-acc); color:var(--uc-text); }
   .mp-cat--active { background:rgba(59,158,218,.12); border-color:var(--uc-acc); color:var(--uc-acc); }
-
-  /* ── Warnings banner ── */
-  .mp-warn-banner {
-    display:flex; gap:12px; align-items:flex-start;
-    background:rgba(246,173,85,.08); border:1px solid rgba(246,173,85,.28);
-    border-radius:var(--uc-rs); padding:14px; margin-bottom:20px;
-    color:var(--uc-warn); font-size:13.5px;
-  }
+  .mp-warn-banner { display:flex; gap:12px; align-items:flex-start; background:rgba(246,173,85,.08); border:1px solid rgba(246,173,85,.28);
+    border-radius:var(--uc-rs); padding:14px; margin-bottom:20px; color:var(--uc-warn); font-size:13.5px; }
   .mp-warn-item { font-size:12.5px; margin-top:4px; opacity:.9; }
-  .mp-warn-confirm {
-    display:inline-flex; align-items:center; gap:6px;
-    margin-top:10px; background:var(--uc-warn); border:none; border-radius:var(--uc-rs);
-    color:#000; font-family:var(--fb); font-size:12.5px; font-weight:700;
-    padding:7px 14px; cursor:pointer; transition:opacity .2s;
-  }
+  .mp-warn-confirm { display:inline-flex; align-items:center; gap:6px; margin-top:10px; background:var(--uc-warn); border:none;
+    border-radius:var(--uc-rs); color:#000; font-family:var(--fb); font-size:12.5px; font-weight:700; padding:7px 14px; cursor:pointer; transition:opacity .2s; }
   .mp-warn-confirm:hover { opacity:.85; }
-
-  /* ── Loading / empty ── */
   .mp-loading { display:flex; flex-direction:column; align-items:center; gap:14px; padding:80px 20px; color:var(--uc-muted); }
   .mp-spinner { width:32px; height:32px; border:3px solid var(--uc-brd); border-top-color:var(--uc-acc); border-radius:50%; animation:spin .7s linear infinite; }
   .mp-spinner-sm { display:inline-block; width:14px; height:14px; border:2px solid rgba(255,255,255,.3); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; }
   @keyframes spin { to{transform:rotate(360deg)} }
   .mp-empty { display:flex; flex-direction:column; align-items:center; gap:12px; padding:80px 20px; color:var(--uc-muted); }
-  .mp-ghost-btn {
-    background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:var(--uc-rs);
-    color:var(--uc-muted); font-family:var(--fb); font-size:13px;
-    padding:9px 18px; cursor:pointer; transition:all .2s;
-  }
+  .mp-ghost-btn { background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:var(--uc-rs); color:var(--uc-muted); font-family:var(--fb); font-size:13px; padding:9px 18px; cursor:pointer; transition:all .2s; }
   .mp-ghost-btn:hover { border-color:var(--uc-acc); color:var(--uc-text); }
-
-  /* ── Items grid ── */
   .mp-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:16px; }
-  .mp-item {
-    background:var(--uc-card); border:1px solid var(--uc-brd); border-radius:var(--uc-r);
-    padding:18px; position:relative; transition:border-color .25s,transform .2s;
-    display:flex; flex-direction:column;
-  }
+  .mp-item { background:var(--uc-card); border:1px solid var(--uc-brd); border-radius:var(--uc-r);
+    padding:18px; position:relative; transition:border-color .25s,transform .2s; display:flex; flex-direction:column; }
   .mp-item:hover { border-color:var(--uc-brd-hi); transform:translateY(-2px); }
   .mp-item--oos { opacity:.55; }
   .mp-item--oos:hover { transform:none; }
@@ -860,14 +774,8 @@ const MENU_CSS = `
   .mp-item-price { font-family:var(--fd); font-size:17px; font-weight:700; color:var(--uc-acc); }
   .mp-item-price small { font-size:11px; font-weight:500; opacity:.7; }
   .mp-cap-msg { font-size:11px; color:var(--uc-warn); margin-top:7px; }
-
-  .mp-add-btn {
-    display:flex; align-items:center; gap:5px;
-    background:linear-gradient(135deg,var(--uc-acc),#2878be);
-    border:none; border-radius:var(--uc-rs); color:#fff;
-    font-family:var(--fb); font-size:12.5px; font-weight:600;
-    padding:7px 14px; cursor:pointer; transition:opacity .2s;
-  }
+  .mp-add-btn { display:flex; align-items:center; gap:5px; background:linear-gradient(135deg,var(--uc-acc),#2878be);
+    border:none; border-radius:var(--uc-rs); color:#fff; font-family:var(--fb); font-size:12.5px; font-weight:600; padding:7px 14px; cursor:pointer; transition:opacity .2s; }
   .mp-add-btn:hover { opacity:.88; }
   .mp-add-btn--disabled { background:var(--uc-inp); border:1px solid var(--uc-brd); color:var(--uc-muted); cursor:not-allowed; }
   .mp-qty-ctrl { display:flex; align-items:center; background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:var(--uc-rs); overflow:hidden; }
@@ -877,8 +785,6 @@ const MENU_CSS = `
   .mp-qty-ctrl span { min-width:28px; text-align:center; font-size:13px; font-weight:600; }
   .mp-qty-ctrl--sm button { width:28px; height:28px; font-size:12px; }
   .mp-qty-ctrl--sm span  { min-width:22px; font-size:12px; }
-
-  /* ── Cart drawer ── */
   .mp-cart { position:fixed; top:60px; right:-100%; width:min(380px,100vw); height:calc(100vh - 60px); z-index:300; transition:right .3s cubic-bezier(.4,0,.2,1); }
   .mp-cart--open { right:0; }
   @media(min-width:1024px) {
@@ -889,7 +795,6 @@ const MENU_CSS = `
   .mp-overlay { position:fixed; inset:0; z-index:299; background:rgba(0,0,0,.5); backdrop-filter:blur(2px); }
   @media(min-width:1024px) { .mp-overlay { display:none; } }
   .mp-cart-inner { height:100%; overflow-y:auto; display:flex; flex-direction:column; background:var(--uc-card); border-left:1px solid var(--uc-brd); padding:20px; }
-
   .mp-cart-hd { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; }
   .mp-cart-title { font-family:var(--fd); font-size:17px; font-weight:700; display:flex; align-items:center; gap:8px; }
   .mp-cart-locked-tag { font-size:11px; background:rgba(246,173,85,.15); color:var(--uc-warn); border:1px solid rgba(246,173,85,.25); border-radius:100px; padding:2px 8px; }
@@ -897,7 +802,6 @@ const MENU_CSS = `
   .mp-cart-close:hover { border-color:var(--uc-danger); color:var(--uc-danger); }
   .mp-cart-empty { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; color:var(--uc-muted); text-align:center; }
   .mp-cart-empty-sub { font-size:12px; opacity:.7; }
-
   .mp-cart-items { flex:1; display:flex; flex-direction:column; gap:10px; overflow-y:auto; margin-bottom:14px; }
   .mp-cart-item { background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:var(--uc-rs); padding:10px 12px; display:flex; flex-direction:column; gap:7px; }
   .mp-cart-item-info { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
@@ -907,8 +811,6 @@ const MENU_CSS = `
   .mp-cart-remove { width:28px; height:28px; display:flex; align-items:center; justify-content:center; background:none; border:1px solid var(--uc-brd); border-radius:var(--uc-rs); color:var(--uc-muted); cursor:pointer; font-size:13px; transition:all .2s; }
   .mp-cart-remove:hover:not(:disabled) { border-color:var(--uc-danger); color:var(--uc-danger); }
   .mp-cart-remove:disabled { opacity:.4; cursor:not-allowed; }
-
-  /* Voucher */
   .mp-voucher { margin-bottom:14px; }
   .mp-voucher-row { display:flex; gap:8px; }
   .mp-voucher-iw { position:relative; flex:1; display:flex; align-items:center; }
@@ -925,41 +827,27 @@ const MENU_CSS = `
   .mp-voucher-applied span { flex:1; }
   .mp-voucher-remove { background:none; border:none; color:var(--uc-acc2); cursor:pointer; font-size:15px; padding:0; line-height:1; transition:opacity .2s; }
   .mp-voucher-remove:hover { opacity:.7; }
-
-  /* Totals */
   .mp-totals { border-top:1px solid var(--uc-brd); padding-top:12px; margin-bottom:14px; display:flex; flex-direction:column; gap:7px; }
   .mp-totals-row { display:flex; justify-content:space-between; font-size:13px; color:var(--uc-muted); }
   .mp-totals-row--disc { color:var(--uc-acc2); }
   .mp-totals-total { font-family:var(--fd); font-size:16px; font-weight:700; color:var(--uc-text); padding-top:7px; border-top:1px solid var(--uc-brd); }
-
-  /* Checkout */
-  .mp-checkout-btn {
-    width:100%; display:flex; align-items:center; justify-content:center; gap:8px;
-    background:linear-gradient(135deg,var(--uc-acc2),#16a87a);
-    border:none; border-radius:var(--uc-rs); color:#fff;
-    font-family:var(--fb); font-size:14px; font-weight:700;
-    padding:13px; cursor:pointer; letter-spacing:.01em;
-    box-shadow:0 4px 18px rgba(34,201,147,.28);
-    transition:transform .15s,box-shadow .15s,opacity .2s;
-  }
+  .mp-checkout-btn { width:100%; display:flex; align-items:center; justify-content:center; gap:8px;
+    background:linear-gradient(135deg,var(--uc-acc2),#16a87a); border:none; border-radius:var(--uc-rs); color:#fff;
+    font-family:var(--fb); font-size:14px; font-weight:700; padding:13px; cursor:pointer; letter-spacing:.01em;
+    box-shadow:0 4px 18px rgba(34,201,147,.28); transition:transform .15s,box-shadow .15s,opacity .2s; }
   .mp-checkout-btn:hover:not(:disabled) { transform:translateY(-1px); box-shadow:0 8px 24px rgba(34,201,147,.38); }
   .mp-checkout-btn:disabled { opacity:.45; cursor:not-allowed; transform:none; box-shadow:none; }
-
-  /* ── Toast ── */
   .uc-toast { display:flex; align-items:center; gap:10px; padding:11px 16px; border-radius:var(--uc-rs); font-size:13px; font-weight:500; min-width:260px; max-width:380px; box-shadow:0 8px 24px rgba(0,0,0,.4); animation:fadeUp .3s ease both; }
   .uc-toast--success { background:#0e2e20; border:1px solid rgba(34,201,147,.3); color:var(--uc-acc2); }
   .uc-toast--warn    { background:#2b1f0a; border:1px solid rgba(246,173,85,.3);  color:var(--uc-warn); }
   .uc-toast--error   { background:#2b0e0e; border:1px solid rgba(245,101,101,.3); color:var(--uc-danger); }
   .uc-toast-close { margin-left:auto; background:none; border:none; cursor:pointer; color:inherit; opacity:.7; font-size:16px; padding:0; }
   @keyframes fadeUp { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
-
   @media(max-width:640px) {
     .mp-grid { grid-template-columns:1fr 1fr; }
     .mp-item { padding:14px; }
     .mp-item-name { font-size:13px; }
     .mp-nav-tabs { display:none; }
   }
-  @media(max-width:420px) {
-    .mp-grid { grid-template-columns:1fr; }
-  }
+  @media(max-width:420px) { .mp-grid { grid-template-columns:1fr; } }
 `;
