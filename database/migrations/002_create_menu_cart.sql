@@ -25,12 +25,13 @@ CREATE TABLE IF NOT EXISTS menu_items (
 );
 
 -- Unified Vouchers Table (Shared with 003)
-CREATE TABLE IF NOT EXISTS vouchers (
+DROP TABLE IF EXISTS vouchers CASCADE;
+CREATE TABLE vouchers (
     id              SERIAL PRIMARY KEY,
     code            VARCHAR(50) NOT NULL UNIQUE,
-    discount_type   VARCHAR(20) NOT NULL DEFAULT 'flat', -- flat | percent | free_delivery
-    discount_value  NUMERIC(10,2) NOT NULL DEFAULT 0,    -- unified value tracking
-    discount        NUMERIC(10,2) NOT NULL DEFAULT 0,    -- mirrored for member 2 backwards-compatibility
+    discount_type   VARCHAR(20) NOT NULL DEFAULT 'flat',
+    discount_value  NUMERIC(10,2) NOT NULL DEFAULT 0,
+    discount        NUMERIC(10,2) NOT NULL DEFAULT 0,
     min_order       NUMERIC(10,2) NOT NULL DEFAULT 0,
     max_uses        INTEGER NOT NULL DEFAULT 1,
     used_count      INTEGER NOT NULL DEFAULT 0,

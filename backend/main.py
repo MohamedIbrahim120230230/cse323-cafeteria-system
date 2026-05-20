@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
 import psycopg2.extras
@@ -112,18 +112,95 @@ def cart_add(data: dict):
 
 @app.post("/api/v1/cart/voucher")
 def cart_voucher(data: dict):
+    code = (data.get("code") or "").strip().upper()
     conn = get_db()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM vouchers WHERE code = %s AND expires_at > NOW()", (data["code"],))
+    cur.execute("SELECT * FROM vouchers WHERE code = %s AND expires_at > NOW()", (code,))
     voucher = cur.fetchone()
     cur.close(); conn.close()
-    if not voucher or voucher["used_by"] is not None:
-        return {"error": "Invalid or expired voucher"}
-    return {"discount": float(voucher["discount"])}
+
+    if not voucher:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "VOUCHER_NOT_FOUND", "message": "Invalid or expired voucher code."},
+        )
+    if voucher["used_by"] is not None:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "VOUCHER_ALREADY_USED", "message": "Voucher has already been used by your account."},
+        )
+
+    return {
+        "discount":       float(voucher["discount"]),
+        "discount_egp":   float(voucher["discount"]),
+        "discount_type":  voucher["discount_type"],
+        "discount_value": float(voucher["discount_value"]),
+        "min_order":      float(voucher["min_order"]),
+        "voucher_code":   code,
+    }
 
 @app.post("/api/v1/cart/lock")
 def cart_lock():
     return {"message": "Cart locked"}
+
+# ── Admin Voucher Routes ──────────────────────────────────────
+@app.get("/api/v1/admin/vouchers")
+def admin_list_vouchers():
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT * FROM vouchers ORDER BY created_at DESC")
+    rows = cur.fetchall()
+    cur.close(); conn.close()
+    return {"vouchers": [dict(r) for r in rows]}
+
+@app.post("/api/v1/admin/vouchers")
+def admin_create_voucher(data: dict):
+    code           = (data.get("code") or "").strip().upper()
+    discount_type  = data.get("discount_type", "flat")
+    discount_value = float(data.get("discount_value", 0))
+    min_order      = float(data.get("min_order", 0))
+    max_uses       = int(data.get("max_uses", 1))
+    expires_at     = data.get("expires_at")          # ISO string from frontend
+
+    if not code:
+        raise HTTPException(status_code=400, detail={"code": "MISSING_CODE", "message": "Voucher code is required."})
+    if discount_type not in ("flat", "percent", "free_delivery"):
+        raise HTTPException(status_code=400, detail={"code": "INVALID_TYPE", "message": "Invalid discount type."})
+    if not expires_at:
+        raise HTTPException(status_code=400, detail={"code": "MISSING_EXPIRY", "message": "Expiry date is required."})
+
+    # For percentage vouchers the discount column stores the % value (e.g. 50 for 50%)
+    discount_col = discount_value if discount_type in ("flat", "percent") else 0
+
+    conn = get_db()
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(
+            """INSERT INTO vouchers
+                   (code, discount_type, discount_value, discount, min_order, max_uses, expires_at, is_active)
+               VALUES (%s, %s, %s, %s, %s, %s, %s::timestamptz, TRUE)
+               RETURNING *""",
+            (code, discount_type, discount_value, discount_col, min_order, max_uses, expires_at)
+        )
+        row = cur.fetchone()
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        if "unique" in str(exc).lower():
+            raise HTTPException(status_code=400, detail={"code": "DUPLICATE_CODE", "message": f"Voucher code '{code}' already exists."})
+        raise HTTPException(status_code=500, detail={"code": "DB_ERROR", "message": str(exc)})
+    finally:
+        cur.close(); conn.close()
+
+    return {"voucher": dict(row)}
+
+@app.delete("/api/v1/admin/vouchers/{code}")
+def admin_delete_voucher(code: str):
+    conn = get_db()
+    cur  = conn.cursor()
+    cur.execute("UPDATE vouchers SET is_active = FALSE WHERE code = %s", (code.upper(),))
+    conn.commit(); cur.close(); conn.close()
+    return {"message": "Voucher deactivated."}
 
 # ── Health ────────────────────────────────────────────────────
 @app.get("/health")

@@ -47,6 +47,11 @@ const EMPTY_FORM = {
   description: "",
 };
 
+const EMPTY_VOUCHER = {
+  code: "", discount_type: "flat", discount_value: "",
+  min_order: "", max_uses: "1", expires_at: "",
+};
+
 // ── Toast ─────────────────────────────────────────────────────
 function Toast({ toasts, removeToast }) {
   return (
@@ -100,6 +105,9 @@ export default function AdminPanel() {
   const navigate                  = useNavigate();
   const { toasts, addToast, removeToast } = useToast();
 
+  const [activeTab,  setActiveTab]  = useState("menu");
+
+  // ── Menu Items state ──────────────────────────────────────
   const [items,      setItems]      = useState([]);
   const [loading,    setLoading]    = useState(true);
   const [saving,     setSaving]     = useState(false);
@@ -110,6 +118,15 @@ export default function AdminPanel() {
   const [search,     setSearch]     = useState("");
   const [confirm,    setConfirm]    = useState(null);
   const [showForm,   setShowForm]   = useState(false);
+
+  // ── Voucher state ─────────────────────────────────────────
+  const [vouchers,      setVouchers]      = useState([]);
+  const [vLoading,      setVLoading]      = useState(false);
+  const [vSaving,       setVSaving]       = useState(false);
+  const [vForm,         setVForm]         = useState(EMPTY_VOUCHER);
+  const [vErrors,       setVErrors]       = useState({});
+  const [showVForm,     setShowVForm]     = useState(false);
+  const [vConfirm,      setVConfirm]      = useState(null);
 
   // ── Fetch items ───────────────────────────────────────────
   const fetchItems = useCallback(async () => {
@@ -125,6 +142,89 @@ export default function AdminPanel() {
   }, []); // eslint-disable-line
 
   useEffect(() => { fetchItems(); }, []);
+
+  // ── Fetch vouchers ────────────────────────────────────────
+  const fetchVouchers = useCallback(async () => {
+    setVLoading(true);
+    try {
+      const data = await apiFetch("/admin/vouchers");
+      setVouchers(data.vouchers || []);
+    } catch {
+      addToast("Failed to load vouchers.", "error");
+    } finally {
+      setVLoading(false);
+    }
+  }, []); // eslint-disable-line
+
+  useEffect(() => { if (activeTab === "vouchers") fetchVouchers(); }, [activeTab]); // eslint-disable-line
+
+  // ── Voucher form helpers ───────────────────────────────────
+  const handleVChange = e => {
+    const { name, value } = e.target;
+    setVForm(p => ({ ...p, [name]: value }));
+    if (vErrors[name]) setVErrors(p => ({ ...p, [name]: "" }));
+  };
+
+  const validateVoucher = () => {
+    const e = {};
+    if (!vForm.code.trim())
+      e.code = "Code is required.";
+    else if (!/^[A-Z0-9_-]{2,20}$/.test(vForm.code.trim().toUpperCase()))
+      e.code = "2-20 characters, letters/numbers/dash/underscore only.";
+    if (vForm.discount_type !== "free_delivery") {
+      if (!vForm.discount_value || isNaN(vForm.discount_value) || parseFloat(vForm.discount_value) <= 0)
+        e.discount_value = "Enter a value > 0.";
+      if (vForm.discount_type === "percent" && parseFloat(vForm.discount_value) > 100)
+        e.discount_value = "Percentage cannot exceed 100.";
+    }
+    if (vForm.min_order && (isNaN(vForm.min_order) || parseFloat(vForm.min_order) < 0))
+      e.min_order = "Must be ≥ 0.";
+    if (!vForm.max_uses || isNaN(vForm.max_uses) || parseInt(vForm.max_uses) < 1)
+      e.max_uses = "Must be ≥ 1.";
+    if (!vForm.expires_at)
+      e.expires_at = "Expiry date is required.";
+    return e;
+  };
+
+  const handleVSubmit = async () => {
+    const errs = validateVoucher();
+    if (Object.keys(errs).length) { setVErrors(errs); return; }
+    setVSaving(true);
+    try {
+      await apiFetch("/admin/vouchers", {
+        method: "POST",
+        body: JSON.stringify({
+          code:           vForm.code.trim().toUpperCase(),
+          discount_type:  vForm.discount_type,
+          discount_value: vForm.discount_type === "free_delivery" ? 0 : parseFloat(vForm.discount_value),
+          min_order:      parseFloat(vForm.min_order || 0),
+          max_uses:       parseInt(vForm.max_uses, 10),
+          expires_at:     new Date(vForm.expires_at).toISOString(),
+        }),
+      });
+      addToast(`Voucher ${vForm.code.toUpperCase()} created.`, "success");
+      setVForm(EMPTY_VOUCHER);
+      setVErrors({});
+      setShowVForm(false);
+      fetchVouchers();
+    } catch (err) {
+      addToast(err?.message || "Failed to create voucher.", "error");
+    } finally {
+      setVSaving(false);
+    }
+  };
+
+  const confirmDeactivateVoucher = async () => {
+    const { code } = vConfirm;
+    setVConfirm(null);
+    try {
+      await apiFetch(`/admin/vouchers/${code}`, { method: "DELETE" });
+      addToast(`Voucher ${code} deactivated.`, "warn");
+      fetchVouchers();
+    } catch (err) {
+      addToast(err?.message || "Failed to deactivate voucher.", "error");
+    }
+  };
 
   // ── Form helpers ──────────────────────────────────────────
   const handleChange = e => {
@@ -281,6 +381,254 @@ export default function AdminPanel() {
 
         <div className="ap-body">
 
+          {/* ── Section tabs ── */}
+          <div className="ap-section-tabs">
+            <button
+              className={"ap-section-tab" + (activeTab === "menu" ? " ap-section-tab--active" : "")}
+              onClick={() => setActiveTab("menu")}
+            >
+              <i className="bi bi-grid-3x3-gap-fill" /> Menu Items
+            </button>
+            <button
+              className={"ap-section-tab" + (activeTab === "vouchers" ? " ap-section-tab--active" : "")}
+              onClick={() => setActiveTab("vouchers")}
+            >
+              <i className="bi bi-ticket-perforated-fill" /> Vouchers
+            </button>
+          </div>
+
+          {/* ══════════ VOUCHERS TAB ══════════ */}
+          {activeTab === "vouchers" && (
+            <>
+              {/* Voucher stats */}
+              <div className="ap-stats">
+                {[
+                  { label:"Total",    value: vouchers.length,                                          icon:"bi-ticket-perforated-fill", color:"var(--uc-acc)"   },
+                  { label:"Active",   value: vouchers.filter(v => v.is_active && new Date(v.expires_at) > new Date()).length, icon:"bi-check-circle-fill",     color:"var(--uc-acc2)"  },
+                  { label:"Expired",  value: vouchers.filter(v => new Date(v.expires_at) <= new Date()).length,               icon:"bi-clock-history",           color:"var(--uc-warn)"  },
+                  { label:"Inactive", value: vouchers.filter(v => !v.is_active).length,                icon:"bi-x-circle-fill",           color:"var(--uc-danger)" },
+                ].map(s => (
+                  <div key={s.label} className="ap-stat">
+                    <i className={"bi " + s.icon} style={{ color:s.color }} />
+                    <div>
+                      <div className="ap-stat-val" style={{ color:s.color }}>{s.value}</div>
+                      <div className="ap-stat-label">{s.label}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Create voucher form */}
+              {showVForm && (
+                <div className="ap-form-card">
+                  <div className="ap-form-hd">
+                    <h2 className="ap-form-title"><i className="bi bi-plus-circle-fill" /> New Voucher</h2>
+                    <button className="mp-cart-close" onClick={() => { setShowVForm(false); setVForm(EMPTY_VOUCHER); setVErrors({}); }} aria-label="Close">
+                      <i className="bi bi-x-lg" />
+                    </button>
+                  </div>
+
+                  <div className="ap-form-grid">
+                    {/* Code */}
+                    <div className="ap-field">
+                      <label className="ap-label">Voucher Code *</label>
+                      <input
+                        name="code" className={"ap-input" + (vErrors.code ? " ap-input--err" : "")}
+                        placeholder="e.g. SUMMER25"
+                        value={vForm.code}
+                        onChange={e => { setVForm(p => ({ ...p, code: e.target.value.toUpperCase() })); if (vErrors.code) setVErrors(p => ({...p, code:""})); }}
+                      />
+                      {vErrors.code && <span className="ap-field-err">{vErrors.code}</span>}
+                    </div>
+
+                    {/* Discount type */}
+                    <div className="ap-field">
+                      <label className="ap-label">Discount Type *</label>
+                      <select name="discount_type" className="ap-input" value={vForm.discount_type} onChange={handleVChange}>
+                        <option value="flat">Flat (EGP off)</option>
+                        <option value="percent">Percentage (% off)</option>
+                        <option value="free_delivery">Free Delivery</option>
+                      </select>
+                    </div>
+
+                    {/* Discount value — hidden for free_delivery */}
+                    {vForm.discount_type !== "free_delivery" && (
+                      <div className="ap-field">
+                        <label className="ap-label">
+                          {vForm.discount_type === "percent" ? "Discount % *" : "Discount Amount (EGP) *"}
+                        </label>
+                        <div className="ap-input-prefix-wrap">
+                          <span className="ap-input-prefix">{vForm.discount_type === "percent" ? "%" : "EGP"}</span>
+                          <input
+                            name="discount_value" type="number" min="0" step="0.01"
+                            className={"ap-input ap-input--prefixed" + (vErrors.discount_value ? " ap-input--err" : "")}
+                            placeholder={vForm.discount_type === "percent" ? "50" : "20.00"}
+                            value={vForm.discount_value} onChange={handleVChange}
+                          />
+                        </div>
+                        {vErrors.discount_value && <span className="ap-field-err">{vErrors.discount_value}</span>}
+                      </div>
+                    )}
+
+                    {/* Min order */}
+                    <div className="ap-field">
+                      <label className="ap-label">Min Order (EGP)</label>
+                      <div className="ap-input-prefix-wrap">
+                        <span className="ap-input-prefix">EGP</span>
+                        <input
+                          name="min_order" type="number" min="0" step="0.01"
+                          className={"ap-input ap-input--prefixed" + (vErrors.min_order ? " ap-input--err" : "")}
+                          placeholder="0.00"
+                          value={vForm.min_order} onChange={handleVChange}
+                        />
+                      </div>
+                      {vErrors.min_order
+                        ? <span className="ap-field-err">{vErrors.min_order}</span>
+                        : <span className="ap-field-hint">Leave 0 for no minimum</span>
+                      }
+                    </div>
+
+                    {/* Max uses */}
+                    <div className="ap-field">
+                      <label className="ap-label">Max Uses *</label>
+                      <input
+                        name="max_uses" type="number" min="1"
+                        className={"ap-input" + (vErrors.max_uses ? " ap-input--err" : "")}
+                        placeholder="100"
+                        value={vForm.max_uses} onChange={handleVChange}
+                      />
+                      {vErrors.max_uses && <span className="ap-field-err">{vErrors.max_uses}</span>}
+                    </div>
+
+                    {/* Expiry */}
+                    <div className="ap-field">
+                      <label className="ap-label">Expiry Date *</label>
+                      <input
+                        name="expires_at" type="datetime-local"
+                        className={"ap-input" + (vErrors.expires_at ? " ap-input--err" : "")}
+                        value={vForm.expires_at} onChange={handleVChange}
+                        min={new Date().toISOString().slice(0,16)}
+                      />
+                      {vErrors.expires_at && <span className="ap-field-err">{vErrors.expires_at}</span>}
+                    </div>
+                  </div>
+
+                  <div className="ap-form-actions">
+                    <button className="ap-cancel-btn" onClick={() => { setShowVForm(false); setVForm(EMPTY_VOUCHER); setVErrors({}); }}>
+                      Cancel
+                    </button>
+                    <button className="ap-submit-btn" onClick={handleVSubmit} disabled={vSaving}>
+                      {vSaving
+                        ? <><span className="mp-spinner-sm" /> Creating…</>
+                        : <><i className="bi bi-plus-circle-fill" /> Create Voucher</>
+                      }
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Voucher table */}
+              <div className="ap-table-card">
+                <div className="ap-table-hd">
+                  <div className="ap-table-hd-left">
+                    <h2 className="ap-form-title"><i className="bi bi-ticket-perforated-fill" /> Vouchers</h2>
+                    <span className="ap-count">{vouchers.length} total</span>
+                  </div>
+                  <div className="ap-table-hd-right">
+                    {!showVForm && (
+                      <button className="ap-add-new-btn" onClick={() => setShowVForm(true)}>
+                        <i className="bi bi-plus-lg" /> New Voucher
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {vLoading ? (
+                  <div className="mp-loading"><div className="mp-spinner" /><span>Loading vouchers…</span></div>
+                ) : vouchers.length === 0 ? (
+                  <div className="mp-empty">
+                    <span style={{ fontSize:40 }}>🎟️</span>
+                    <p>No vouchers yet. Create one above.</p>
+                  </div>
+                ) : (
+                  <div className="ap-table-wrap">
+                    <table className="ap-table">
+                      <thead>
+                        <tr>
+                          <th>Code</th>
+                          <th>Type</th>
+                          <th>Value</th>
+                          <th>Min Order</th>
+                          <th>Uses</th>
+                          <th>Expires</th>
+                          <th>Status</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {vouchers.map(v => {
+                          const expired  = new Date(v.expires_at) <= new Date();
+                          const active   = v.is_active && !expired;
+                          const typeLabel = v.discount_type === "flat" ? "Flat" : v.discount_type === "percent" ? "Percent" : "Free Delivery";
+                          const valueLabel = v.discount_type === "flat"
+                            ? Number(v.discount_value).toFixed(2) + " EGP"
+                            : v.discount_type === "percent"
+                              ? Number(v.discount_value).toFixed(0) + "%"
+                              : "—";
+                          return (
+                            <tr key={v.id} className={!active ? "ap-row--inactive" : ""}>
+                              <td><span className="ap-item-name" style={{ fontFamily:"monospace", letterSpacing:".05em" }}>{v.code}</span></td>
+                              <td><span className="ap-cat-badge">{typeLabel}</span></td>
+                              <td className="ap-price">{valueLabel}</td>
+                              <td style={{ fontSize:12.5, color:"var(--uc-muted)" }}>
+                                {Number(v.min_order) > 0 ? Number(v.min_order).toFixed(0) + " EGP" : "None"}
+                              </td>
+                              <td style={{ fontSize:12.5 }}>
+                                {v.used_count} / {v.max_uses}
+                              </td>
+                              <td style={{ fontSize:11.5, color: expired ? "var(--uc-danger)" : "var(--uc-muted)" }}>
+                                {new Date(v.expires_at).toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric" })}
+                                {expired && " (expired)"}
+                              </td>
+                              <td>
+                                <span className={"ap-status " + (active ? "ap-status--active" : "ap-status--inactive")}>
+                                  <span className="ap-status-dot" />
+                                  {active ? "Active" : expired ? "Expired" : "Inactive"}
+                                </span>
+                              </td>
+                              <td>
+                                {v.is_active && (
+                                  <button
+                                    className="ap-deactivate-btn"
+                                    title="Deactivate voucher"
+                                    onClick={() => setVConfirm({ code: v.code })}
+                                  >
+                                    <i className="bi bi-x-circle-fill" />
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {vConfirm && (
+                <ConfirmModal
+                  message={"Deactivate voucher " + vConfirm.code + "? Students will no longer be able to use it."}
+                  onConfirm={confirmDeactivateVoucher}
+                  onCancel={() => setVConfirm(null)}
+                />
+              )}
+            </>
+          )}
+
+          {/* ══════════ MENU ITEMS TAB ══════════ */}
+          {activeTab === "menu" && (
+            <>
           {/* ── Stats row ── */}
           <div className="ap-stats">
             {[
@@ -512,7 +860,12 @@ export default function AdminPanel() {
               </div>
             )}
           </div>
-        </div>
+
+            </>
+          )}
+          {/* ── END MENU ITEMS TAB ── */}
+
+        </div>{/* /ap-body */}
 
         {confirm && (
           <ConfirmModal
@@ -696,6 +1049,12 @@ const ADMIN_CSS = `
   .uc-toast--warn    { background:#2b1f0a; border:1px solid rgba(246,173,85,.3);  color:var(--uc-warn); }
   .uc-toast--error   { background:#2b0e0e; border:1px solid rgba(245,101,101,.3); color:var(--uc-danger); }
   .uc-toast-close { margin-left:auto; background:none; border:none; cursor:pointer; color:inherit; opacity:.7; font-size:16px; padding:0; }
+  /* ── Section tabs ── */
+  .ap-section-tabs { display:flex; gap:4px; background:var(--uc-inp); border:1px solid var(--uc-brd); border-radius:var(--uc-r); padding:4px; align-self:flex-start; }
+  .ap-section-tab { display:flex; align-items:center; gap:7px; background:none; border:none; border-radius:10px; color:var(--uc-muted); font-family:var(--fb); font-size:13px; font-weight:600; padding:8px 18px; cursor:pointer; transition:all .2s; white-space:nowrap; }
+  .ap-section-tab:hover { color:var(--uc-text); background:rgba(255,255,255,.05); }
+  .ap-section-tab--active { background:var(--uc-card); color:var(--uc-text); box-shadow:0 1px 6px rgba(0,0,0,.4); }
+  .ap-section-tab--active i { color:var(--uc-acc); }
   @media(max-width:640px) {
     .ap-table th:nth-child(2), .ap-table td:nth-child(2) { display:none; }
     .ap-table th:nth-child(7), .ap-table td:nth-child(7) { display:none; }

@@ -47,6 +47,7 @@ const CATEGORIES = [
 const VOUCHER_ERRORS = {
   VOUCHER_ALREADY_USED:    "Voucher has already been used by your account.",
   VOUCHER_EXPIRED:         "Voucher has expired.",
+  VOUCHER_NOT_FOUND:       "Invalid voucher code.",
   VOUCHER_MIN_ORDER:       "Minimum order of 100 EGP required for this voucher.",
   VOUCHER_REVOKED:         "Voucher is no longer valid.",
   VOUCHER_STACK_REJECTED:  "Only one voucher may be applied per order.",
@@ -212,16 +213,28 @@ export default function MenuPage() {
         method: "POST",
         body: JSON.stringify({ code: voucher.trim().toUpperCase() }),
       });
-      const discountAmt = Math.min(data.discount ?? data.discount_egp ?? 0, subtotal);
+      // Calculate actual EGP discount based on discount_type
+      const dtype  = data.discount_type ?? "flat";
+      const dvalue = data.discount_value ?? data.discount ?? data.discount_egp ?? 0;
+      const discountAmt = dtype === "percent"
+        ? Math.min((dvalue / 100) * subtotal, subtotal)
+        : Math.min(dvalue, subtotal);
+
+      if (discountAmt === 0 && dtype === "free_delivery") {
+        addToast("Voucher applied! Free delivery on this order.", "success");
+      } else {
+        addToast(`Voucher applied! You save ${discountAmt.toFixed(2)} EGP`, "success");
+      }
+
       setDiscount(discountAmt);
       setVoucherApplied(true);
       setAppliedVoucherObj({
-        code: voucher.trim().toUpperCase(),
-        discount_type:  data.discount_type  ?? "flat",
-        discount_value: data.discount ?? data.discount_egp ?? 0,
+        code:           voucher.trim().toUpperCase(),
+        discount_type:  dtype,
+        discount_value: dvalue,
       });
-      addToast(`Voucher applied! You save ${discountAmt.toFixed(2)} EGP`, "success");
     } catch (err) {
+      // apiFetch now unwraps FastAPI detail, so err.code and err.message are top-level
       const code = err?.code ?? "";
       setVoucherError(
         VOUCHER_ERRORS[code] ??

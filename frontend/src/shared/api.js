@@ -47,7 +47,12 @@ export async function apiFetch(path, options = {}) {
     return;
   }
 
-  if (!res.ok) throw json.error ?? json;
+  if (!res.ok) {
+    // FastAPI wraps errors as { detail: { code, message } } or { detail: "string" }
+    const detail = json.detail ?? json.error ?? json;
+    if (typeof detail === "string") throw { message: detail };
+    throw detail;
+  }
 
   return json.data !== undefined ? json.data : json;
 }
@@ -70,7 +75,12 @@ export async function apiLogin(email, password) {
   try { json = JSON.parse(text); }
   catch { throw { code: "INVALID_JSON", message: "Unexpected server response." }; }
 
-  if (!res.ok) throw json.error ?? json;
+  if (!res.ok) {
+    // FastAPI wraps errors as { detail: { code, message } } or { detail: "string" }
+    const detail = json.detail ?? json.error ?? json;
+    if (typeof detail === "string") throw { message: detail };
+    throw detail;
+  }
 
   // FIX-1: backend returns `access_token` inside a `data` envelope.
   // Support both shapes: { data: { access_token, user } } and { token, user }
