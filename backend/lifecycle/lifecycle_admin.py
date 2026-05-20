@@ -437,7 +437,7 @@ def get_report(
             "from": from_date,
             "to": to_date,
             "total_rows": len(data),
-            "data": _s(data),
+            "report_rows": _s(data),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail={"message": str(e)})
