@@ -517,18 +517,18 @@ function ReportsTab({ role, actorId, addToast }) {
         </div>
       )}
 
-      {data?.data?.length > 0 && (
+      {data?.report_rows?.length > 0 && (
         <div className="lc-table-card" style={{ marginTop:16 }}>
           <div className="lc-table-meta">
-            {data.report_type} · {data.from} → {data.to} · {data.data.length} rows
+            {data.report_type} · {data.from} → {data.to} · {data.report_rows.length} rows
           </div>
           <div className="lc-table-wrap">
             <table className="lc-table">
               <thead>
-                <tr>{Object.keys(data.data[0]).map(k => <th key={k}>{k.toUpperCase()}</th>)}</tr>
+                <tr>{Object.keys(data.report_rows[0]).map(k => <th key={k}>{k.toUpperCase()}</th>)}</tr>
               </thead>
               <tbody>
-                {data.data.map((row, i) => (
+                {data.report_rows.map((row, i) => (
                   <tr key={i}>
                     {Object.values(row).map((v,j) => (
                       <td key={j}>{typeof v === "object" ? JSON.stringify(v) : String(v)}</td>

@@ -382,6 +382,15 @@ BEGIN
 END;
 $$;
 
+
+CREATE TABLE IF NOT EXISTS ratings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID,
+    stars INTEGER CHECK (stars BETWEEN 1 AND 5),
+    text TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
 -- ============================================================
 -- COMMENTS
 -- ============================================================
