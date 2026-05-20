@@ -121,9 +121,6 @@ psql -U postgres -d cafeteria -f database/migrations/005_create_lifecycle_report
 ###  3. Run the backend
 ```
 
-
-
-```powershell
 cd C:\Users\Administrator\Downloads\CampusBite\backend
 
 # Set the database connection string
